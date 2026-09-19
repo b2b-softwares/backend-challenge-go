@@ -179,3 +179,67 @@ func (r *IdempotencyRepository) Create(
 
 	return nil
 }
+
+func (r *IdempotencyRepository) Update(
+	ctx context.Context,
+	record ports.IdempotencyRecord,
+) error {
+	if record.ProviderID == "" ||
+		record.IdempotencyKey == "" ||
+		record.PayloadHash == "" ||
+		record.TransactionID == uuid.Nil {
+		return errors.New("invalid idempotency record")
+	}
+
+	db := r.resolveDB(ctx)
+	if db == nil {
+		return errors.New(
+			"idempotency repository: database is nil",
+		)
+	}
+
+	var observedBalanceCurrency any
+
+	if record.ObservedBalanceCurrency != "" {
+		observedBalanceCurrency = record.ObservedBalanceCurrency
+	}
+
+	commandTag, err := db.Exec(
+		ctx,
+		`
+		UPDATE idempotency_records
+		SET
+			payload_hash = $3,
+			transaction_id = $4,
+			status = $5,
+			response_body = $6,
+			observed_balance_amount = $7,
+			observed_balance_currency = $8
+		WHERE provider_id = $1
+		  AND idempotency_key = $2
+		`,
+		record.ProviderID,
+		record.IdempotencyKey,
+		record.PayloadHash,
+		record.TransactionID,
+		record.Status,
+		record.ResponseBody,
+		record.ObservedBalanceAmount,
+		observedBalanceCurrency,
+	)
+
+	if err != nil {
+		return fmt.Errorf(
+			"update idempotency record: %w",
+			err,
+		)
+	}
+
+	if commandTag.RowsAffected() != 1 {
+		return fmt.Errorf(
+			"update idempotency record: record not found",
+		)
+	}
+
+	return nil
+}

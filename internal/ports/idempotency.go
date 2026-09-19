@@ -28,4 +28,9 @@ type IdempotencyRepository interface {
 		ctx context.Context,
 		record IdempotencyRecord,
 	) error
+
+	Update(
+		ctx context.Context,
+		record IdempotencyRecord,
+	) error
 }

@@ -206,8 +206,10 @@ type fakeIdempotencyRepository struct {
 	record      ports.IdempotencyRecord
 	findErr     error
 	createErr   error
+	updateErr   error
 	findCalls   int
 	createCalls int
+	updateCalls int
 }
 
 func (f *fakeIdempotencyRepository) Find(
@@ -232,6 +234,21 @@ func (f *fakeIdempotencyRepository) Create(
 
 	if f.createErr != nil {
 		return f.createErr
+	}
+
+	f.record = record
+
+	return nil
+}
+
+func (f *fakeIdempotencyRepository) Update(
+	_ context.Context,
+	record ports.IdempotencyRecord,
+) error {
+	f.updateCalls++
+
+	if f.updateErr != nil {
+		return f.updateErr
 	}
 
 	f.record = record

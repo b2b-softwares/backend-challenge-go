@@ -538,6 +538,14 @@ func (r *WagerTransactionRepository) UpdateReferenceRetry(
 
 	db := r.resolveDB(ctx)
 
+	/*
+		PENDING_REFERENCE transactions receive a durable 24h expiration
+		when the retry schedule is first created.
+
+		The expiration is only initialized when it is currently NULL.
+		This is important because subsequent retries must preserve the
+		original TTL instead of extending it indefinitely.
+	*/
 	result, err := db.Exec(
 		ctx,
 		`
@@ -545,13 +553,16 @@ func (r *WagerTransactionRepository) UpdateReferenceRetry(
 		SET
 			reference_attempts = $1,
 			reference_available_at = $2,
-			updated_at = $3
-		WHERE id = $4
+			reference_expires_at = COALESCE(
+				reference_expires_at,
+				NOW() + INTERVAL '24 hours'
+			),
+			updated_at = NOW()
+		WHERE id = $3
 		  AND status = 'PENDING_REFERENCE'
 		`,
 		attempts,
 		availableAt,
-		time.Now().UTC(),
 		transactionID,
 	)
 	if err != nil {
