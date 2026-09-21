@@ -387,6 +387,7 @@ func newFixture(t *testing.T) testFixture {
 		idempotency,
 		outbox,
 		transactionDB,
+		nil,
 	)
 
 	return testFixture{

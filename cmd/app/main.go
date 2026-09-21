@@ -14,6 +14,7 @@ import (
 	"github.com/junglegaming/backend-challenge-go/internal/application"
 	"github.com/junglegaming/backend-challenge-go/internal/config"
 	httpserver "github.com/junglegaming/backend-challenge-go/internal/http"
+	"github.com/junglegaming/backend-challenge-go/internal/observability"
 	"github.com/junglegaming/backend-challenge-go/internal/ports"
 )
 
@@ -26,6 +27,9 @@ func main() {
 	fx.New(
 		fx.Provide(
 			config.Load,
+
+			observability.NewConfig,
+			observability.New,
 
 			func(cfg config.Config) string {
 				return cfg.Database
@@ -120,6 +124,7 @@ func main() {
 			registerMigrations,
 			registerLifecycle,
 			registerHTTPServer,
+			registerObservability,
 			registerOutboxPublisher,
 			registerWagerConsumer,
 			registerPendingReferenceWorker,
@@ -148,6 +153,18 @@ func registerMigrations(
 func registerHTTPServer(
 	server *httpserver.Server,
 ) {
+}
+
+func registerObservability(
+	providers *observability.Providers,
+) {
+	if providers == nil {
+		panic("observability providers are nil")
+	}
+
+	log.Println(
+		"OpenTelemetry initialized",
+	)
 }
 
 func registerLifecycle(

@@ -31,6 +31,7 @@ func TestWagerService_SameIdempotencyKeyConcurrentRequests_ExecutesExactlyOnce(t
 		idempotencyRepository,
 		outboxRepository,
 		transactionManager,
+		nil,
 	)
 
 	playerID := uuid.New()

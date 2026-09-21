@@ -34,6 +34,7 @@ func TestWagerService_ConcurrentBetsNeverProduceNegativeBalance(t *testing.T) {
 		idempotencyRepository,
 		outboxRepository,
 		transactionManager,
+		nil,
 	)
 
 	playerID := uuid.New()

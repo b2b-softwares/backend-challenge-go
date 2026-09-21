@@ -88,6 +88,66 @@ services:
       retries: 30
       start_period: 15s
 
+  jaeger:
+    image: jaegertracing/all-in-one:1.76.0
+    container_name: backend-challenge-jaeger
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "${JAEGER_PORT:-16686}:16686"
+    volumes:
+      - jaeger_data:/badger
+
+  otel-collector:
+    build:
+      context: ./infra/otel-collector
+      dockerfile: Dockerfile
+    container_name: backend-challenge-otel-collector
+    restart: unless-stopped
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8889:8889"
+    depends_on:
+      jaeger:
+        condition: service_started
+
+  prometheus:
+    build:
+      context: ./infra/prometheus
+      dockerfile: Dockerfile
+    container_name: backend-challenge-prometheus
+    restart: unless-stopped
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - prometheus_data:/prometheus
+    depends_on:
+      otel-collector:
+        condition: service_started
+
+  grafana:
+    build:
+      context: ./infra/grafana
+      dockerfile: Dockerfile
+    container_name: backend-challenge-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      prometheus:
+        condition: service_started
+      jaeger:
+        condition: service_started
+
   api:
     build:
       context: .
@@ -112,6 +172,11 @@ services:
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-backend-api}
       OIDC_AUDIENCE: ${OIDC_AUDIENCE:-backend-api}
 
+      OTEL_SERVICE_NAME: ${OTEL_SERVICE_NAME:-backend-challenge-api}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-grpc}
+      OTEL_RESOURCE_ATTRIBUTES: ${OTEL_RESOURCE_ATTRIBUTES:-deployment.environment=local}
+
     ports:
       - "${HTTP_PORT:-8080}:8080"
 
@@ -124,7 +189,12 @@ services:
         condition: service_completed_successfully
       keycloak:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
 
 volumes:
   postgres_data:
   ministack_data:
+  prometheus_data:
+  jaeger_data:
+  grafana_data:

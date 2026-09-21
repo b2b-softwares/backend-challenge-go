@@ -12,8 +12,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel/attribute"
+	otmetric "go.opentelemetry.io/otel/metric"
 
 	"github.com/junglegaming/backend-challenge-go/internal/domain"
+	"github.com/junglegaming/backend-challenge-go/internal/observability"
 	"github.com/junglegaming/backend-challenge-go/internal/ports"
 )
 
@@ -26,12 +29,107 @@ const (
 	inboxStatusProcessed  = "PROCESSED"
 )
 
+type wagerConsumerMetrics struct {
+	sqsMessagesReceivedTotal    otmetric.Int64Counter
+	sqsMessagesProcessedTotal   otmetric.Int64Counter
+	sqsMessagesFailedTotal      otmetric.Int64Counter
+	sqsMessagesDeletedTotal     otmetric.Int64Counter
+	sqsProcessingDuration       otmetric.Float64Histogram
+	inboxMessagesReceivedTotal  otmetric.Int64Counter
+	inboxMessagesProcessedTotal otmetric.Int64Counter
+	inboxMessagesFailedTotal    otmetric.Int64Counter
+	inboxDuplicateTotal         otmetric.Int64Counter
+}
+
+func newWagerConsumerMetrics(
+	providers *observability.Providers,
+) *wagerConsumerMetrics {
+	meter := observability.Meter(providers)
+
+	sqsMessagesReceivedTotal, _ := meter.Int64Counter(
+		"sqs_messages_received_total",
+		otmetric.WithDescription(
+			"Total number of messages received from SQS.",
+		),
+	)
+
+	sqsMessagesProcessedTotal, _ := meter.Int64Counter(
+		"sqs_messages_processed_total",
+		otmetric.WithDescription(
+			"Total number of SQS messages successfully processed.",
+		),
+	)
+
+	sqsMessagesFailedTotal, _ := meter.Int64Counter(
+		"sqs_messages_failed_total",
+		otmetric.WithDescription(
+			"Total number of SQS messages that failed processing.",
+		),
+	)
+
+	sqsMessagesDeletedTotal, _ := meter.Int64Counter(
+		"sqs_messages_deleted_total",
+		otmetric.WithDescription(
+			"Total number of SQS messages successfully deleted.",
+		),
+	)
+
+	sqsProcessingDuration, _ := meter.Float64Histogram(
+		"sqs_message_processing_duration_seconds",
+		otmetric.WithDescription(
+			"Time spent processing SQS wager messages.",
+		),
+		otmetric.WithUnit("s"),
+	)
+
+	inboxMessagesReceivedTotal, _ := meter.Int64Counter(
+		"inbox_messages_received_total",
+		otmetric.WithDescription(
+			"Total number of wager messages received by the Inbox.",
+		),
+	)
+
+	inboxMessagesProcessedTotal, _ := meter.Int64Counter(
+		"inbox_messages_processed_total",
+		otmetric.WithDescription(
+			"Total number of Inbox messages successfully processed.",
+		),
+	)
+
+	inboxMessagesFailedTotal, _ := meter.Int64Counter(
+		"inbox_messages_failed_total",
+		otmetric.WithDescription(
+			"Total number of Inbox message processing failures.",
+		),
+	)
+
+	inboxDuplicateTotal, _ := meter.Int64Counter(
+		"inbox_duplicate_total",
+		otmetric.WithDescription(
+			"Total number of duplicate Inbox messages detected.",
+		),
+	)
+
+	return &wagerConsumerMetrics{
+		sqsMessagesReceivedTotal:    sqsMessagesReceivedTotal,
+		sqsMessagesProcessedTotal:   sqsMessagesProcessedTotal,
+		sqsMessagesFailedTotal:      sqsMessagesFailedTotal,
+		sqsMessagesDeletedTotal:     sqsMessagesDeletedTotal,
+		sqsProcessingDuration:       sqsProcessingDuration,
+		inboxMessagesReceivedTotal:  inboxMessagesReceivedTotal,
+		inboxMessagesProcessedTotal: inboxMessagesProcessedTotal,
+		inboxMessagesFailedTotal:    inboxMessagesFailedTotal,
+		inboxDuplicateTotal:         inboxDuplicateTotal,
+	}
+}
+
 type WagerConsumer struct {
 	messages      ports.MessageConsumer
 	inbox         ports.InboxRepository
 	transactionDB ports.TransactionManager
 	wagerService  *WagerService
 	workerID      string
+	metrics       *wagerConsumerMetrics
 }
 
 func NewWagerConsumer(
@@ -39,6 +137,7 @@ func NewWagerConsumer(
 	inbox ports.InboxRepository,
 	transactionDB ports.TransactionManager,
 	wagerService *WagerService,
+	providers *observability.Providers,
 ) *WagerConsumer {
 	return &WagerConsumer{
 		messages:      messages,
@@ -46,6 +145,7 @@ func NewWagerConsumer(
 		transactionDB: transactionDB,
 		wagerService:  wagerService,
 		workerID:      uuid.New().String(),
+		metrics:       newWagerConsumerMetrics(providers),
 	}
 }
 
@@ -97,7 +197,11 @@ func (c *WagerConsumer) Run(ctx context.Context) error {
 		}
 
 		for _, message := range messages {
+			c.recordSQSReceived(ctx)
+
 			if err := c.processMessage(ctx, message); err != nil {
+				c.recordSQSFailed(ctx)
+
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
@@ -113,6 +217,8 @@ func (c *WagerConsumer) Run(ctx context.Context) error {
 				// encaminhará para a DLQ configurada.
 				continue
 			}
+
+			c.recordSQSProcessed(ctx)
 		}
 	}
 }
@@ -120,7 +226,29 @@ func (c *WagerConsumer) Run(ctx context.Context) error {
 func (c *WagerConsumer) processMessage(
 	ctx context.Context,
 	message ports.Message,
-) error {
+) (err error) {
+	startedAt := time.Now()
+
+	defer func() {
+		if c == nil || c.metrics == nil {
+			return
+		}
+
+		status := "processed"
+
+		if err != nil {
+			status = "failed"
+		}
+
+		c.metrics.sqsProcessingDuration.Record(
+			ctx,
+			time.Since(startedAt).Seconds(),
+			otmetric.WithAttributes(
+				attribute.String("status", status),
+			),
+		)
+	}()
+
 	if message.ID == "" {
 		return errors.New("wager consumer: SQS message id is required")
 	}
@@ -166,7 +294,7 @@ func (c *WagerConsumer) processMessage(
 	*/
 	processed := false
 
-	err := c.transactionDB.WithinTransaction(
+	err = c.transactionDB.WithinTransaction(
 		ctx,
 		func(txCtx context.Context) error {
 			existing, err := c.inbox.Find(
@@ -176,6 +304,8 @@ func (c *WagerConsumer) processMessage(
 			)
 
 			if err == nil {
+				c.recordInboxReceived(ctx)
+
 				if existing.MessageHash != payloadHash {
 					return fmt.Errorf(
 						"message %s was redelivered with different payload",
@@ -185,6 +315,7 @@ func (c *WagerConsumer) processMessage(
 
 				if existing.Status == inboxStatusProcessed {
 					processed = true
+					c.recordInboxDuplicate(ctx)
 				}
 
 				return nil
@@ -221,10 +352,13 @@ func (c *WagerConsumer) processMessage(
 				)
 			}
 
+			c.recordInboxReceived(ctx)
+
 			return nil
 		},
 	)
 	if err != nil {
+		c.recordInboxFailed(ctx)
 		return err
 	}
 
@@ -243,6 +377,9 @@ func (c *WagerConsumer) processMessage(
 				err,
 			)
 		}
+
+		c.recordSQSDeleted(ctx)
+		c.recordInboxProcessed(ctx)
 
 		return nil
 	}
@@ -297,10 +434,13 @@ func (c *WagerConsumer) processMessage(
 		},
 	)
 	if err != nil {
+		c.recordInboxFailed(ctx)
 		return err
 	}
 
 	if processed {
+		c.recordInboxDuplicate(ctx)
+
 		if err := c.messages.Delete(ctx, message); err != nil {
 			return fmt.Errorf(
 				"delete already processed SQS message %s: %w",
@@ -308,6 +448,9 @@ func (c *WagerConsumer) processMessage(
 				err,
 			)
 		}
+
+		c.recordSQSDeleted(ctx)
+		c.recordInboxProcessed(ctx)
 
 		return nil
 	}
@@ -388,6 +531,7 @@ func (c *WagerConsumer) processMessage(
 		},
 	)
 	if err != nil {
+		c.recordInboxFailed(ctx)
 		return err
 	}
 
@@ -410,7 +554,74 @@ func (c *WagerConsumer) processMessage(
 		)
 	}
 
+	c.recordSQSDeleted(ctx)
+	c.recordInboxProcessed(ctx)
+
 	return nil
+}
+
+func (c *WagerConsumer) recordSQSReceived(ctx context.Context) {
+	if c == nil || c.metrics == nil {
+		return
+	}
+
+	c.metrics.sqsMessagesReceivedTotal.Add(ctx, 1)
+}
+
+func (c *WagerConsumer) recordSQSProcessed(ctx context.Context) {
+	if c == nil || c.metrics == nil {
+		return
+	}
+
+	c.metrics.sqsMessagesProcessedTotal.Add(ctx, 1)
+}
+
+func (c *WagerConsumer) recordSQSFailed(ctx context.Context) {
+	if c == nil || c.metrics == nil {
+		return
+	}
+
+	c.metrics.sqsMessagesFailedTotal.Add(ctx, 1)
+}
+
+func (c *WagerConsumer) recordSQSDeleted(ctx context.Context) {
+	if c == nil || c.metrics == nil {
+		return
+	}
+
+	c.metrics.sqsMessagesDeletedTotal.Add(ctx, 1)
+}
+
+func (c *WagerConsumer) recordInboxReceived(ctx context.Context) {
+	if c == nil || c.metrics == nil {
+		return
+	}
+
+	c.metrics.inboxMessagesReceivedTotal.Add(ctx, 1)
+}
+
+func (c *WagerConsumer) recordInboxProcessed(ctx context.Context) {
+	if c == nil || c.metrics == nil {
+		return
+	}
+
+	c.metrics.inboxMessagesProcessedTotal.Add(ctx, 1)
+}
+
+func (c *WagerConsumer) recordInboxFailed(ctx context.Context) {
+	if c == nil || c.metrics == nil {
+		return
+	}
+
+	c.metrics.inboxMessagesFailedTotal.Add(ctx, 1)
+}
+
+func (c *WagerConsumer) recordInboxDuplicate(ctx context.Context) {
+	if c == nil || c.metrics == nil {
+		return
+	}
+
+	c.metrics.inboxDuplicateTotal.Add(ctx, 1)
 }
 
 func validateWagerMessage(

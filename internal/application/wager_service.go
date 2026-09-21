@@ -9,14 +9,93 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"go.opentelemetry.io/otel/attribute"
+	otmetric "go.opentelemetry.io/otel/metric"
 
 	"github.com/junglegaming/backend-challenge-go/internal/domain"
+	"github.com/junglegaming/backend-challenge-go/internal/observability"
 	"github.com/junglegaming/backend-challenge-go/internal/ports"
 )
 
 const failureCodeInsufficientBalance = "INSUFFICIENT_BALANCE"
 
 const maxConcurrentModificationRetries = 3
+
+type wagerMetrics struct {
+	transactionsTotal          otmetric.Int64Counter
+	transactionsProcessedTotal otmetric.Int64Counter
+	transactionsRejectedTotal  otmetric.Int64Counter
+	processingDurationSeconds  otmetric.Float64Histogram
+	idempotencyReplaysTotal    otmetric.Int64Counter
+	idempotencyConflictsTotal  otmetric.Int64Counter
+	insufficientBalanceTotal   otmetric.Int64Counter
+}
+
+func newWagerMetrics(
+	providers *observability.Providers,
+) *wagerMetrics {
+	meter := observability.Meter(providers)
+
+	transactionsTotal, _ := meter.Int64Counter(
+		"wager_transactions_total",
+		otmetric.WithDescription(
+			"Total number of wager transactions completed with a terminal outcome.",
+		),
+	)
+
+	transactionsProcessedTotal, _ := meter.Int64Counter(
+		"wager_transactions_processed_total",
+		otmetric.WithDescription(
+			"Total number of wager transactions processed successfully.",
+		),
+	)
+
+	transactionsRejectedTotal, _ := meter.Int64Counter(
+		"wager_transactions_rejected_total",
+		otmetric.WithDescription(
+			"Total number of wager transactions rejected.",
+		),
+	)
+
+	processingDurationSeconds, _ := meter.Float64Histogram(
+		"wager_processing_duration_seconds",
+		otmetric.WithDescription(
+			"Time spent processing wager requests.",
+		),
+		otmetric.WithUnit("s"),
+	)
+
+	idempotencyReplaysTotal, _ := meter.Int64Counter(
+		"wager_idempotency_replays_total",
+		otmetric.WithDescription(
+			"Total number of wager requests served by idempotency replay.",
+		),
+	)
+
+	idempotencyConflictsTotal, _ := meter.Int64Counter(
+		"wager_idempotency_conflicts_total",
+		otmetric.WithDescription(
+			"Total number of idempotency conflicts.",
+		),
+	)
+
+	insufficientBalanceTotal, _ := meter.Int64Counter(
+		"wallet_insufficient_balance_total",
+		otmetric.WithDescription(
+			"Total number of wager attempts rejected due to insufficient wallet balance.",
+		),
+	)
+
+	return &wagerMetrics{
+		transactionsTotal:          transactionsTotal,
+		transactionsProcessedTotal: transactionsProcessedTotal,
+		transactionsRejectedTotal:  transactionsRejectedTotal,
+		processingDurationSeconds:  processingDurationSeconds,
+		idempotencyReplaysTotal:    idempotencyReplaysTotal,
+		idempotencyConflictsTotal:  idempotencyConflictsTotal,
+		insufficientBalanceTotal:   insufficientBalanceTotal,
+	}
+}
 
 type WagerService struct {
 	wallets       ports.WalletRepository
@@ -25,6 +104,7 @@ type WagerService struct {
 	idempotency   ports.IdempotencyRepository
 	outbox        ports.OutboxRepository
 	transactionDB ports.TransactionManager
+	metrics       *wagerMetrics
 }
 
 func NewWagerService(
@@ -34,6 +114,7 @@ func NewWagerService(
 	idempotency ports.IdempotencyRepository,
 	outbox ports.OutboxRepository,
 	transactionDB ports.TransactionManager,
+	providers *observability.Providers,
 ) *WagerService {
 	return &WagerService{
 		wallets:       wallets,
@@ -42,6 +123,7 @@ func NewWagerService(
 		idempotency:   idempotency,
 		outbox:        outbox,
 		transactionDB: transactionDB,
+		metrics:       newWagerMetrics(providers),
 	}
 }
 
@@ -92,6 +174,24 @@ func (s *WagerService) PlaceBet(
 	ctx context.Context,
 	input PlaceBetInput,
 ) (WagerResult, error) {
+	startedAt := time.Now()
+
+	metricStatus := "error"
+
+	defer func() {
+		if s == nil || s.metrics == nil {
+			return
+		}
+
+		s.metrics.processingDurationSeconds.Record(
+			ctx,
+			time.Since(startedAt).Seconds(),
+			otmetric.WithAttributes(
+				attribute.String("status", metricStatus),
+			),
+		)
+	}()
+
 	if s == nil ||
 		s.wallets == nil ||
 		s.transactions == nil ||
@@ -114,10 +214,27 @@ func (s *WagerService) PlaceBet(
 		input.IdempotencyKey,
 	)
 	if err == nil {
-		return replayIdempotencyRecord(
+		result, replayErr := replayIdempotencyRecord(
 			existing,
 			input.PayloadHash,
 		)
+
+		if replayErr != nil {
+			if errors.Is(
+				replayErr,
+				domain.ErrIdempotencyConflict,
+			) {
+				s.recordIdempotencyConflict(ctx)
+				metricStatus = "idempotency_conflict"
+			}
+
+			return WagerResult{}, replayErr
+		}
+
+		s.recordIdempotencyReplay(ctx)
+		metricStatus = "replayed"
+
+		return result, nil
 	}
 
 	if !errors.Is(err, pgx.ErrNoRows) {
@@ -186,7 +303,10 @@ func (s *WagerService) PlaceBet(
 					input.Amount,
 					now,
 				); err != nil {
-					if !errors.Is(err, domain.ErrInsufficientBalance) {
+					if !errors.Is(
+						err,
+						domain.ErrInsufficientBalance,
+					) {
 						return err
 					}
 
@@ -406,15 +526,26 @@ func (s *WagerService) PlaceBet(
 		select {
 		case <-ctx.Done():
 			return WagerResult{}, ctx.Err()
-		case <-time.After(time.Duration(attempt) * 10 * time.Millisecond):
+		case <-time.After(
+			time.Duration(attempt) * 10 * time.Millisecond,
+		):
 		}
 	}
 
 	if err == nil && rejectedByInsufficientBalance {
+		s.recordRejectedTransaction(ctx)
+		s.recordInsufficientBalance(ctx)
+
+		metricStatus = "rejected"
+
 		return result, domain.ErrInsufficientBalance
 	}
 
 	if err == nil {
+		s.recordProcessedTransaction(ctx)
+
+		metricStatus = "processed"
+
 		return result, nil
 	}
 
@@ -437,8 +568,20 @@ func (s *WagerService) PlaceBet(
 			input.PayloadHash,
 		)
 		if replayErr != nil {
+			if errors.Is(
+				replayErr,
+				domain.ErrIdempotencyConflict,
+			) {
+				s.recordIdempotencyConflict(ctx)
+				metricStatus = "idempotency_conflict"
+			}
+
 			return WagerResult{}, replayErr
 		}
+
+		s.recordIdempotencyReplay(ctx)
+
+		metricStatus = "replayed"
 
 		result.IdempotentReplay = true
 
@@ -464,8 +607,20 @@ func (s *WagerService) PlaceBet(
 			input.PayloadHash,
 		)
 		if replayErr != nil {
+			if errors.Is(
+				replayErr,
+				domain.ErrIdempotencyConflict,
+			) {
+				s.recordIdempotencyConflict(ctx)
+				metricStatus = "idempotency_conflict"
+			}
+
 			return WagerResult{}, replayErr
 		}
+
+		s.recordIdempotencyReplay(ctx)
+
+		metricStatus = "replayed"
 
 		result.IdempotentReplay = true
 
@@ -473,6 +628,78 @@ func (s *WagerService) PlaceBet(
 	}
 
 	return WagerResult{}, err
+}
+
+func (s *WagerService) recordProcessedTransaction(
+	ctx context.Context,
+) {
+	if s == nil || s.metrics == nil {
+		return
+	}
+
+	s.metrics.transactionsTotal.Add(
+		ctx,
+		1,
+		otmetric.WithAttributes(
+			attribute.String("status", "processed"),
+		),
+	)
+
+	s.metrics.transactionsProcessedTotal.Add(
+		ctx,
+		1,
+	)
+}
+
+func (s *WagerService) recordRejectedTransaction(
+	ctx context.Context,
+) {
+	if s == nil || s.metrics == nil {
+		return
+	}
+
+	s.metrics.transactionsTotal.Add(
+		ctx,
+		1,
+		otmetric.WithAttributes(
+			attribute.String("status", "rejected"),
+		),
+	)
+
+	s.metrics.transactionsRejectedTotal.Add(
+		ctx,
+		1,
+	)
+}
+
+func (s *WagerService) recordInsufficientBalance(
+	ctx context.Context,
+) {
+	if s == nil || s.metrics == nil {
+		return
+	}
+
+	s.metrics.insufficientBalanceTotal.Add(ctx, 1)
+}
+
+func (s *WagerService) recordIdempotencyReplay(
+	ctx context.Context,
+) {
+	if s == nil || s.metrics == nil {
+		return
+	}
+
+	s.metrics.idempotencyReplaysTotal.Add(ctx, 1)
+}
+
+func (s *WagerService) recordIdempotencyConflict(
+	ctx context.Context,
+) {
+	if s == nil || s.metrics == nil {
+		return
+	}
+
+	s.metrics.idempotencyConflictsTotal.Add(ctx, 1)
 }
 
 func validatePlaceBetInput(input PlaceBetInput) error {

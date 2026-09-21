@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.uber.org/fx"
 
 	"github.com/junglegaming/backend-challenge-go/internal/application"
@@ -37,10 +38,15 @@ func NewServer(
 		tokenValidator,
 	)(handler)
 
+	instrumentedHandler := otelhttp.NewHandler(
+		protectedHandler,
+		"HTTP "+cfg.HTTPPort,
+	)
+
 	server := &Server{
 		server: &nethttp.Server{
 			Addr:              ":" + cfg.HTTPPort,
-			Handler:           protectedHandler,
+			Handler:           instrumentedHandler,
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       10 * time.Second,
 			WriteTimeout:      10 * time.Second,
