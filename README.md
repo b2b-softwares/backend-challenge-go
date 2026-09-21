@@ -4,6 +4,59 @@ Backend para processamento distribuído de transações de apostas, desenvolvido
 
 ---
 
+# Documentação
+
+A documentação do projeto foi organizada por responsabilidade, mantendo este README como ponto de entrada operacional.
+
+| Documento | Descrição |
+|---|---|
+| [REQUIREMENTS.md](REQUIREMENTS.md) | Requisitos funcionais e não funcionais do desafio |
+| [BUSINESS_RULES.md](BUSINESS_RULES.md) | Regras de negócio, invariantes e restrições financeiras |
+| [TRACEABILITY.md](TRACEABILITY.md) | Rastreabilidade entre requisitos, regras, implementação e testes |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | Arquitetura, componentes, padrões, decisões e infraestrutura |
+| [docs/use-cases.md](docs/use-cases.md) | Casos de uso e fluxos funcionais |
+| [docs/api-contract.md](docs/api-contract.md) | Contrato da API HTTP |
+| [docs/events.md](docs/events.md) | Eventos, Outbox, Inbox, SQS e processamento assíncrono |
+
+## Mapa da documentação
+
+```text
+README.md
+   │
+   ├── REQUIREMENTS.md
+   │      └── O que o sistema precisa fazer
+   │
+   ├── BUSINESS_RULES.md
+   │      └── Quais regras o negócio deve respeitar
+   │
+   ├── TRACEABILITY.md
+   │      └── Como requisitos e regras são implementados e testados
+   │
+   ├── ARCHITECTURE.md
+   │      └── Como o sistema foi arquitetado
+   │
+   └── docs/
+          ├── use-cases.md
+          │      └── Fluxos funcionais
+          │
+          ├── api-contract.md
+          │      └── Contrato HTTP
+          │
+          └── events.md
+                 └── Mensageria e eventos
+```
+
+Para uma leitura rápida:
+
+1. Comece por este `README.md` para executar e validar o projeto.
+2. Consulte `REQUIREMENTS.md` para entender os requisitos.
+3. Consulte `BUSINESS_RULES.md` para entender as regras de negócio.
+4. Consulte `ARCHITECTURE.md` para entender a arquitetura.
+5. Consulte `TRACEABILITY.md` para relacionar requisitos, regras, código e testes.
+6. Consulte `docs/` para os contratos e fluxos detalhados.
+
+---
+
 # 1. Status do Projeto
 
 Projeto funcionalmente implementado e validado.
@@ -78,8 +131,11 @@ Visão simplificada:
 
 ```text
                          CLIENT
+
                            │
+
                            ▼
+
                     ┌─────────────┐
                     │  Keycloak   │
                     │    OIDC     │
@@ -184,12 +240,15 @@ O domínio não depende diretamente de:
 - OpenTelemetry;
 - Keycloak.
 
+Detalhes completos estão em [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ---
 
 # 5. Estrutura do Projeto
 
 ```text
 .
+
 ├── cmd/
 │   └── app/
 │       └── main.go
@@ -241,7 +300,15 @@ O domínio não depende diretamente de:
 ├── docker-compose.yml
 ├── Dockerfile
 ├── go.mod
-└── README.md
+├── README.md
+├── REQUIREMENTS.md
+├── BUSINESS_RULES.md
+├── TRACEABILITY.md
+├── ARCHITECTURE.md
+└── docs/
+    ├── use-cases.md
+    ├── api-contract.md
+    └── events.md
 ```
 
 ---
@@ -301,6 +368,7 @@ docker compose version
 
 ```bash
 git clone git@github.com:b2b-softwares/backend-challenge-go.git
+
 cd backend-challenge-go
 ```
 
@@ -340,13 +408,13 @@ Após iniciar o ambiente:
 
 | Serviço | URL |
 |---|---|
-| API | http://localhost:8080 |
-| Grafana | http://localhost:3000 |
-| Prometheus | http://localhost:9090 |
-| Jaeger | http://localhost:16686 |
-| Keycloak | http://localhost:8081 |
-| MiniStack | http://localhost:4566 |
-| OTel Collector Metrics | http://localhost:8889/metrics |
+| API | [http://localhost:8080](http://localhost:8080) |
+| Grafana | [http://localhost:3000](http://localhost:3000) |
+| Prometheus | [http://localhost:9090](http://localhost:9090) |
+| Jaeger | [http://localhost:16686](http://localhost:16686) |
+| Keycloak | [http://localhost:8081](http://localhost:8081) |
+| MiniStack | [http://localhost:4566](http://localhost:4566) |
+| OTel Collector Metrics | [http://localhost:8889/metrics](http://localhost:8889/metrics) |
 
 ---
 
@@ -542,7 +610,7 @@ Resultado esperado:
 Endpoint:
 
 ```text
-POST /wagering/transactions
+POST /transactions/wager
 ```
 
 Headers obrigatórios:
@@ -568,6 +636,8 @@ Payload:
 }
 ```
 
+O contrato completo está em [docs/api-contract.md](docs/api-contract.md).
+
 ---
 
 # 19. Fase 4 — Primeira Aposta
@@ -584,7 +654,7 @@ Execute:
 ```bash
 curl -i \
   -X POST \
-  http://localhost:8080/wagering/transactions \
+  http://localhost:8080/transactions/wager \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: wager-001" \
@@ -623,7 +693,7 @@ Reenvie exatamente a mesma requisição com a mesma chave:
 ```bash
 curl -i \
   -X POST \
-  http://localhost:8080/wagering/transactions \
+  http://localhost:8080/transactions/wager \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: wager-001" \
@@ -690,7 +760,7 @@ Execute uma aposta com valor superior ao saldo disponível:
 ```bash
 curl -i \
   -X POST \
-  http://localhost:8080/wagering/transactions \
+  http://localhost:8080/transactions/wager \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: insufficient-001" \
@@ -726,6 +796,7 @@ Exemplo conceitual:
 Saldo = 90
 
 Request A = 50
+
 Request B = 50
 ```
 
@@ -734,7 +805,7 @@ Executar duas chamadas em paralelo:
 ```bash
 curl -s \
   -X POST \
-  http://localhost:8080/wagering/transactions \
+  http://localhost:8080/transactions/wager \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: concurrent-a" \
@@ -751,7 +822,7 @@ curl -s \
 
 curl -s \
   -X POST \
-  http://localhost:8080/wagering/transactions \
+  http://localhost:8080/transactions/wager \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: concurrent-b" \
@@ -773,6 +844,7 @@ Com saldo inicial de R$90, o resultado esperado é:
 
 ```text
 Uma operação  → PROCESSED
+
 Uma operação  → REJECTED
 
 Saldo final → R$40
@@ -892,8 +964,11 @@ O fluxo esperado é:
 
 ```text
 PENDING
+
    │
+
    ▼
+
 Published
 ```
 
@@ -946,23 +1021,41 @@ O consumer deve:
 
 ```text
 Receive message
+
      │
+
      ▼
+
 Validate
+
      │
+
      ▼
+
 Inbox
+
      │
+
      ▼
+
 Claim
+
      │
+
      ▼
+
 Process
+
      │
+
      ▼
+
 Mark Processed
+
      │
+
      ▼
+
 Delete SQS
 ```
 
@@ -976,26 +1069,35 @@ O comportamento esperado é:
 
 ```text
 Message
+
    │
+
    ▼
+
 Processing
+
    │
+
    X
+
 Failure
+
    │
+
    ▼
+
 Redelivery
 ```
 
-Quando a mesma mensagem chegar novamente, a Inbox deve impedir a duplicação
-do efeito financeiro.
+Quando a mesma mensagem chegar novamente, a Inbox deve impedir a duplicação do efeito financeiro.
+
+Detalhes do mecanismo estão em [docs/events.md](docs/events.md).
 
 ---
 
 # 34. Fase 18 — DLQ
 
-Mensagens que falharem repetidamente devem ser direcionadas à DLQ conforme
-a política configurada no ambiente.
+Mensagens que falharem repetidamente devem ser direcionadas à DLQ conforme a política configurada no ambiente.
 
 Verificar filas:
 
@@ -1022,15 +1124,25 @@ O fluxo esperado é:
 
 ```text
 Pending Reference
+
        │
+
        ▼
+
 Worker
+
        │
+
        ▼
+
 Reference Available?
+
        │
+
        ├── Yes → Process
+
        │
+
        └── No  → Retry
 ```
 
@@ -1209,10 +1321,15 @@ A observabilidade utiliza:
 
 ```text
 OpenTelemetry
+
       │
+
       ▼
+
 OTel Collector
+
       │
+
       ├────────────► Prometheus
       │                  │
       │                  ▼
@@ -1242,21 +1359,27 @@ O dashboard contém informações de:
 ### Indicadores do Dashboard
 
 #### 1. HTTP
+
 Monitora o comportamento da API HTTP, incluindo volume de requisições, taxa de erros e latência das respostas. Permite identificar indisponibilidade, degradação de performance e aumento de erros.
 
 #### 2. Wager
+
 Acompanha o processamento das apostas, mostrando a quantidade de transações recebidas e seus respectivos estados, como processadas e rejeitadas. Permite acompanhar o volume e o resultado do processamento das apostas.
 
 #### 3. Latency
+
 Mede o tempo necessário para processar as operações, principalmente requisições HTTP e transações de apostas. Os percentis P50 e P95 ajudam a identificar o tempo típico e os casos de maior latência.
 
 #### 4. Business Outcomes
+
 Representa os resultados de negócio das apostas, diferenciando operações processadas com sucesso das rejeitadas. Permite acompanhar o comportamento funcional do sistema, além da simples disponibilidade técnica.
 
 #### 5. SQS
+
 Monitora o processamento assíncrono das mensagens, incluindo mensagens recebidas, processadas e removidas da fila. Permite verificar o funcionamento do fluxo distribuído e identificar possíveis acúmulos ou falhas no consumidor.
 
 #### 6. Inbox
+
 Acompanha o mecanismo de Inbox utilizado para garantir processamento idempotente das mensagens. Permite observar mensagens recebidas, processadas e situações de duplicidade, ajudando a validar que uma mesma mensagem não seja processada mais de uma vez.
 
 ---
@@ -1534,20 +1657,35 @@ Fluxo recomendado para investigação:
 
 ```text
 Grafana
+
    │
+
    ▼
+
 Detectar aumento de latency/error
+
    │
+
    ▼
+
 Jaeger
+
    │
+
    ▼
+
 Encontrar trace
+
    │
+
    ▼
+
 Identificar span lento
+
    │
+
    ▼
+
 Investigar PostgreSQL / SQS
 ```
 
@@ -1637,6 +1775,8 @@ Uma mensagem redeliverada não deve gerar:
 efeito financeiro duplicado
 ```
 
+As regras formais estão documentadas em [BUSINESS_RULES.md](BUSINESS_RULES.md).
+
 ---
 
 # 59. Verificar Idempotência Manualmente
@@ -1645,6 +1785,7 @@ Executar uma requisição:
 
 ```text
 Idempotency-Key = test-123
+
 Amount = 10.00
 ```
 
@@ -1652,6 +1793,7 @@ Repetir:
 
 ```text
 Idempotency-Key = test-123
+
 Amount = 10.00
 ```
 
@@ -1659,6 +1801,7 @@ Esperado:
 
 ```text
 Primeira → Processed
+
 Segunda  → Replay
 ```
 
@@ -1666,6 +1809,7 @@ Depois:
 
 ```text
 Idempotency-Key = test-123
+
 Amount = 20.00
 ```
 
@@ -1698,7 +1842,9 @@ Esperado:
 
 ```text
 Processed = 1
+
 Rejected  = 1
+
 Balance   = 40
 ```
 
@@ -1710,30 +1856,55 @@ Antes de considerar a versão pronta:
 
 ```text
 [ ] gofmt -l .
+
 [ ] go test ./...
+
 [ ] go test -race ./...
+
 [ ] go build ./...
+
 [ ] docker compose build
+
 [ ] docker compose up -d
+
 [ ] /health
+
 [ ] /health/ready
+
 [ ] Keycloak token
+
 [ ] API authenticated
+
 [ ] Wager processed
+
 [ ] Idempotency replay
+
 [ ] Idempotency conflict
+
 [ ] Insufficient balance
+
 [ ] Concurrent wagers
+
 [ ] Ledger
+
 [ ] Inbox
+
 [ ] Outbox
+
 [ ] SQS consumer
+
 [ ] Redelivery
+
 [ ] DLQ
+
 [ ] Pending Reference Worker
+
 [ ] Prometheus
+
 [ ] Grafana
+
 [ ] Jaeger
+
 [ ] OpenTelemetry
 ```
 
@@ -1931,8 +2102,7 @@ docker compose logs grafana
 
 O diretório de dashboards deve estar disponível para o container.
 
-Se estiver utilizando Docker Desktop, confirme que o diretório do projeto está
-habilitado em File Sharing.
+Se estiver utilizando Docker Desktop, confirme que o diretório do projeto está habilitado em File Sharing.
 
 ---
 
@@ -2000,8 +2170,7 @@ Para executar a aplicação diretamente:
 go run ./cmd/app
 ```
 
-Nesse caso, as dependências externas precisam estar disponíveis e as variáveis
-de ambiente devem estar corretamente configuradas.
+Nesse caso, as dependências externas precisam estar disponíveis e as variáveis de ambiente devem estar corretamente configuradas.
 
 ---
 
@@ -2059,19 +2228,25 @@ O `client_secret` utilizado no ambiente local é exclusivamente para desenvolvim
 
 # 66. Local vs AWS
 
-O projeto foi estruturado para que o ambiente local possa simular a arquitetura
-de produção.
+O projeto foi estruturado para que o ambiente local possa simular a arquitetura de produção.
 
 Local:
 
 ```text
 PostgreSQL
+
 MiniStack
+
 Keycloak
+
 Docker Compose
+
 OpenTelemetry
+
 Prometheus
+
 Grafana
+
 Jaeger
 ```
 
@@ -2079,11 +2254,17 @@ Possível produção:
 
 ```text
 RDS PostgreSQL
+
 Amazon SQS
+
 OIDC Provider
+
 ECS / EKS
+
 OpenTelemetry
+
 Prometheus
+
 Grafana
 ```
 
@@ -2099,7 +2280,9 @@ A API é stateless.
 
 ```text
 API 1
+
 API 2
+
 API 3
 ```
 
@@ -2107,7 +2290,9 @@ Consumers também podem ser escalados:
 
 ```text
 Consumer 1
+
 Consumer 2
+
 Consumer 3
 ```
 
@@ -2130,14 +2315,23 @@ A operação financeira principal deve ser transacional:
 
 ```text
 BEGIN
+
     │
+
     ├── lock wallet
+
     ├── validate balance
+
     ├── update wallet
+
     ├── create transaction
+
     ├── append ledger
+
     └── create outbox
+
     │
+
 COMMIT
 ```
 
@@ -2155,17 +2349,29 @@ A parte assíncrona é eventualmente consistente:
 
 ```text
 Transaction
+
     │
+
     ▼
+
 Outbox
+
     │
+
     ▼
+
 SQS
+
     │
+
     ▼
+
 Consumer
+
     │
+
     ▼
+
 Inbox
 ```
 
@@ -2185,9 +2391,13 @@ O modelo é:
 
 ```text
 At-Least-Once Delivery
+
           +
+
 Idempotent Processing
+
           =
+
 Effectively Once Business Effect
 ```
 
@@ -2207,10 +2417,15 @@ Sem Outbox:
 
 ```text
 DB COMMIT
+
    │
+
    ▼
+
 Publish SQS
+
    │
+
    X
 ```
 
@@ -2222,8 +2437,11 @@ Com Outbox:
 BEGIN
 
 Wallet
+
 Transaction
+
 Ledger
+
 Outbox
 
 COMMIT
@@ -2233,8 +2451,11 @@ Depois:
 
 ```text
 Outbox
+
    │
+
    ▼
+
 SQS
 ```
 
@@ -2250,14 +2471,23 @@ Sem Inbox:
 
 ```text
 Message
+
    │
+
    ▼
+
 Debit
+
    │
+
    ▼
+
 Redelivery
+
    │
+
    ▼
+
 Debit AGAIN
 ```
 
@@ -2265,14 +2495,23 @@ Com Inbox:
 
 ```text
 Message
+
    │
+
    ▼
+
 Inbox
+
    │
+
    ▼
+
 Debit
+
    │
+
    ▼
+
 PROCESSED
 ```
 
@@ -2280,11 +2519,17 @@ Na redelivery:
 
 ```text
 Message
+
    │
+
    ▼
+
 Inbox
+
    │
+
    ▼
+
 Already Processed
 ```
 
@@ -2306,7 +2551,9 @@ Balance = 90.00
 
 Ledger
 ------
+
 +100.00
+
 -10.00
 ```
 
@@ -2344,8 +2591,11 @@ O consumer expõe:
 
 ```text
 sqs_messages_received_total
+
 sqs_messages_processed_total
+
 sqs_messages_deleted_total
+
 sqs_message_processing_duration_seconds
 ```
 
@@ -2371,6 +2621,7 @@ As métricas:
 
 ```text
 inbox_messages_received_total
+
 inbox_messages_processed_total
 ```
 
@@ -2384,7 +2635,9 @@ A validação mínima recomendada é:
 
 ```bash
 go test ./...
+
 go test -race ./...
+
 go build ./...
 ```
 
@@ -2392,6 +2645,7 @@ Se houver Docker disponível:
 
 ```bash
 docker compose build
+
 docker compose up -d
 ```
 
@@ -2441,8 +2695,11 @@ Docker:
 
 ```bash
 docker compose up -d
+
 docker compose down
+
 docker compose ps
+
 docker compose logs -f
 ```
 
@@ -2462,8 +2719,7 @@ Parar e remover volumes:
 docker compose down -v
 ```
 
-Atenção: `-v` remove os volumes persistentes do ambiente local, incluindo dados
-do PostgreSQL e outros serviços configurados com volumes.
+Atenção: `-v` remove os volumes persistentes do ambiente local, incluindo dados do PostgreSQL e outros serviços configurados com volumes.
 
 ---
 
@@ -2473,7 +2729,9 @@ Quando houver alteração no código ou Dockerfile:
 
 ```bash
 docker compose down
+
 docker compose build --no-cache
+
 docker compose up -d
 ```
 
@@ -2515,6 +2773,7 @@ Uma validação completa pode ser executada nesta ordem:
 
 ```bash
 docker compose up -d
+
 docker compose ps
 ```
 
@@ -2522,6 +2781,7 @@ docker compose ps
 
 ```bash
 curl -i http://localhost:8080/health
+
 curl -i http://localhost:8080/health/ready
 ```
 
@@ -2646,7 +2906,9 @@ Os principais cenários funcionais validados incluem:
 
 ```text
 Sem token
+
     ↓
+
 401
 ```
 
@@ -2654,9 +2916,13 @@ Com token válido:
 
 ```text
 Bearer Token
+
     ↓
+
 API
+
     ↓
+
 200
 ```
 
@@ -2666,10 +2932,13 @@ API
 
 ```text
 Wallet = 100
+
 Bet = 10
 
 Result:
+
 Wallet = 90
+
 Transaction = PROCESSED
 ```
 
@@ -2679,13 +2948,19 @@ Transaction = PROCESSED
 
 ```text
 Request 1
+
     ↓
+
 Processed
 
 Request 2
+
 same Idempotency-Key
+
 same payload
+
     ↓
+
 Replay
 ```
 
@@ -2697,11 +2972,15 @@ Sem novo débito.
 
 ```text
 Request 1
+
 Key = X
+
 Amount = 10
 
 Request 2
+
 Key = X
+
 Amount = 20
 ```
 
@@ -2737,6 +3016,7 @@ Sem débito.
 Balance = 90
 
 Bet A = 50
+
 Bet B = 50
 ```
 
@@ -2744,7 +3024,9 @@ Resultado:
 
 ```text
 One processed
+
 One rejected
+
 Final balance = 40
 ```
 
@@ -2756,13 +3038,21 @@ Mensagem publicada:
 
 ```text
 SQS
+
  ↓
+
 Consumer
+
  ↓
+
 Inbox
+
  ↓
+
 Business Processing
+
  ↓
+
 Delete Message
 ```
 
@@ -2822,63 +3112,121 @@ Em produção, recomenda-se adicionalmente:
 
 ---
 
-# 87. Documentação de Arquitetura
+# 87. Documentação do Projeto
 
-Para detalhes da arquitetura, decisões de design, padrões utilizados,
-fluxos transacionais, concorrência, Inbox, Outbox, observabilidade e
-estratégia de escalabilidade, consulte:
+A documentação foi separada para facilitar a avaliação técnica e a manutenção do projeto.
 
-```text
-ARCHITECTURE.md
-```
+## Requisitos
+
+[REQUIREMENTS.md](REQUIREMENTS.md)
+
+Contém os requisitos funcionais e não funcionais do sistema.
+
+## Regras de Negócio
+
+[BUSINESS_RULES.md](BUSINESS_RULES.md)
+
+Contém as regras financeiras, invariantes, idempotência, concorrência, Inbox, Outbox e demais regras de negócio.
+
+## Arquitetura
+
+[ARCHITECTURE.md](ARCHITECTURE.md)
+
+Contém detalhes da arquitetura, componentes, padrões, decisões, persistência, mensageria, observabilidade, segurança e escalabilidade.
+
+## Rastreabilidade
+
+[TRACEABILITY.md](TRACEABILITY.md)
+
+Relaciona requisitos e regras de negócio com implementação, testes e cenários de aceitação.
+
+## Casos de Uso
+
+[docs/use-cases.md](docs/use-cases.md)
+
+Descreve os principais fluxos funcionais do sistema.
+
+## Contrato da API
+
+[docs/api-contract.md](docs/api-contract.md)
+
+Documenta autenticação, endpoints, requests, responses, validações e comportamento de idempotência.
+
+## Eventos
+
+[docs/events.md](docs/events.md)
+
+Documenta eventos, Outbox, Inbox, SQS, redelivery, DLQ e processamento assíncrono.
 
 ---
 
 # 88. Conclusão
 
-O projeto foi desenvolvido com foco em um cenário realista de processamento
-financeiro distribuído.
+O projeto foi desenvolvido com foco em um cenário realista de processamento financeiro distribuído.
 
 Os principais mecanismos de confiabilidade são:
 
 ```text
 Exact Money
+
      +
+
 Database Transactions
+
      +
+
 Concurrency Control
+
      +
+
 Idempotency
+
      +
+
 Inbox
+
      +
+
 Outbox
+
      +
+
 SQS
+
      +
+
 DLQ
+
      +
+
 Observability
+
      +
+
 Automated Tests
 ```
 
 O resultado é uma arquitetura modular, testável e preparada para evolução.
 
-O domínio permanece desacoplado da infraestrutura, permitindo substituir
-componentes como:
+O domínio permanece desacoplado da infraestrutura, permitindo substituir componentes como:
 
 ```text
 SQS
+
   ↕
+
 RabbitMQ
 
 PostgreSQL
+
   ↕
+
 Outro adapter de persistência
 
 MiniStack
+
   ↕
+
 AWS
 ```
 
@@ -2892,11 +3240,17 @@ Antes de entregar:
 
 ```bash
 gofmt -w .
+
 go test ./...
+
 go test -race ./...
+
 go build ./...
+
 docker compose build
+
 docker compose up -d
+
 docker compose ps
 ```
 
@@ -2904,20 +3258,30 @@ Depois validar:
 
 ```text
 Health
+
 OIDC
+
 Wager
+
 Idempotency
+
 Conflict
+
 Insufficient Balance
+
 Concurrency
+
 Inbox
+
 Outbox
+
 SQS
+
 Grafana
+
 Prometheus
+
 Jaeger
 ```
 
-Com isso, o backend pode ser avaliado tanto pela funcionalidade quanto pelos
-aspectos arquiteturais, de consistência, concorrência, resiliência e
-observabilidade.
+Com isso, o backend pode ser avaliado tanto pela funcionalidade quanto pelos aspectos arquiteturais, de consistência, concorrência, resiliência e observabilidade.
