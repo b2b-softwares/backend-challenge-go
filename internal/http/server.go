@@ -13,6 +13,7 @@ import (
 
 	"github.com/junglegaming/backend-challenge-go/internal/application"
 	"github.com/junglegaming/backend-challenge-go/internal/config"
+	"github.com/junglegaming/backend-challenge-go/internal/ports"
 )
 
 type Server struct {
@@ -25,16 +26,21 @@ func NewServer(
 	cfg config.Config,
 	pool *pgxpool.Pool,
 	wagerService *application.WagerService,
+	tokenValidator ports.TokenValidator,
 ) *Server {
 	handler := NewHandler(
 		pool,
 		wagerService,
 	)
 
+	protectedHandler := AuthMiddleware(
+		tokenValidator,
+	)(handler)
+
 	server := &Server{
 		server: &nethttp.Server{
 			Addr:              ":" + cfg.HTTPPort,
-			Handler:           handler,
+			Handler:           protectedHandler,
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       10 * time.Second,
 			WriteTimeout:      10 * time.Second,

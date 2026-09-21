@@ -33,6 +33,16 @@ func (m *TransactionManager) WithinTransaction(
 		return errors.New("transaction manager: callback is nil")
 	}
 
+	if existingTx, ok := dbtxFromContext(ctx); ok {
+		return fn(
+			context.WithValue(
+				ctx,
+				transactionContextKey{},
+				existingTx,
+			),
+		)
+	}
+
 	tx, err := m.db.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)

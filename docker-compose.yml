@@ -21,5 +21,71 @@ services:
       timeout: 5s
       retries: 10
 
+  ministack:
+    image: ministackorg/ministack:latest
+    container_name: backend-challenge-ministack
+    restart: unless-stopped
+    environment:
+      MINISTACK_REGION: ${AWS_REGION:-us-east-1}
+      MINISTACK_ACCOUNT_ID: "000000000000"
+      PERSIST_STATE: "1"
+      STATE_DIR: /var/lib/ministack-state
+    ports:
+      - "${LOCALSTACK_PORT:-4566}:4566"
+    volumes:
+      - ministack_data:/var/lib/ministack-state
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4566/_ministack/health', timeout=2).read()\""
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+  sqs-init:
+    build:
+      context: ./infra/ministack
+      dockerfile: Dockerfile
+    container_name: backend-challenge-sqs-init
+    restart: "no"
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-test}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-test}
+      AWS_DEFAULT_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-http://ministack:4566}
+    depends_on:
+      ministack:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: backend-challenge-api
+    restart: unless-stopped
+    environment:
+      HTTP_PORT: ${HTTP_PORT:-8080}
+      DATABASE_URL: ${DATABASE_URL:-postgres://backend:backend@postgres:5432/backend_challenge}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-test}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-test}
+      AWS_ENDPOINT_URL: ${AWS_ENDPOINT_URL:-http://ministack:4566}
+      SQS_QUEUE_URL: ${SQS_QUEUE_URL:-http://ministack:4566/000000000000/wager-transactions.fifo}
+      SQS_EVENTS_QUEUE_URL: ${SQS_EVENTS_QUEUE_URL:-http://ministack:4566/000000000000/wager-events.fifo}
+      SQS_DLQ_URL: ${SQS_DLQ_URL:-http://ministack:4566/000000000000/wager-transactions-dlq.fifo}
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ministack:
+        condition: service_healthy
+      sqs-init:
+        condition: service_completed_successfully
+
 volumes:
   postgres_data:
+  ministack_data:
