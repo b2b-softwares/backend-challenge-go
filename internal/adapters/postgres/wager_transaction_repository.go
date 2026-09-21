@@ -614,14 +614,18 @@ func (r *WagerTransactionRepository) Update(
 		`
 		UPDATE wager_transactions
 		SET
-			reference_transaction_id = $1,
-			status = $2,
-			failure_code = $3,
-			result_balance_minor = $4,
-			result_balance_currency = $5,
-			updated_at = $6
-		WHERE id = $7
+			amount_minor = $1,
+			currency = $2,
+			reference_transaction_id = $3,
+			status = $4,
+			failure_code = $5,
+			result_balance_minor = $6,
+			result_balance_currency = $7,
+			updated_at = $8
+		WHERE id = $9
 		`,
+		transaction.Money().Amount(),
+		string(transaction.Money().Currency()),
 		referenceTransactionID,
 		string(transaction.Status()),
 		transaction.FailureCode(),

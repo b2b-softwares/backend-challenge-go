@@ -3,16 +3,23 @@ package main
 import (
 	"context"
 	"log"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/fx"
 
+	"github.com/junglegaming/backend-challenge-go/internal/adapters/oidc"
 	"github.com/junglegaming/backend-challenge-go/internal/adapters/postgres"
 	"github.com/junglegaming/backend-challenge-go/internal/adapters/sqs"
 	"github.com/junglegaming/backend-challenge-go/internal/application"
 	"github.com/junglegaming/backend-challenge-go/internal/config"
 	httpserver "github.com/junglegaming/backend-challenge-go/internal/http"
 	"github.com/junglegaming/backend-challenge-go/internal/ports"
+)
+
+const (
+	pendingReferenceWorkerInterval = 5 * time.Second
+	pendingReferenceWorkerBatch    = 10
 )
 
 func main() {
@@ -25,6 +32,8 @@ func main() {
 			},
 
 			postgres.NewPool,
+
+			postgres.NewMigrator,
 
 			func(db *pgxpool.Pool) ports.WalletRepository {
 				return postgres.NewWalletRepository(db)
@@ -76,6 +85,20 @@ func main() {
 				)
 			},
 
+			func(cfg config.Config) (ports.TokenValidator, error) {
+				return oidc.NewVerifier(
+					context.Background(),
+					cfg.OIDCIssuerURL,
+					cfg.OIDCClientID,
+					cfg.OIDCAudience,
+				)
+			},
+
+			application.NewReversalService,
+			application.NewWagerService,
+			application.NewWagerConsumer,
+			application.NewPendingReferenceWorker,
+
 			func(
 				outbox ports.OutboxRepository,
 				eventPublisher ports.EventPublisher,
@@ -90,28 +113,41 @@ func main() {
 				)
 			},
 
-			application.NewWagerService,
-
-			application.NewWagerConsumer,
-
 			httpserver.NewServer,
 		),
 
 		fx.Invoke(
+			registerMigrations,
 			registerLifecycle,
 			registerHTTPServer,
 			registerOutboxPublisher,
 			registerWagerConsumer,
+			registerPendingReferenceWorker,
 		),
 
 		fx.NopLogger,
 	).Run()
 }
 
+func registerMigrations(
+	migrator *postgres.Migrator,
+) error {
+	if err := migrator.Run(
+		context.Background(),
+	); err != nil {
+		return err
+	}
+
+	log.Println(
+		"database migrations completed",
+	)
+
+	return nil
+}
+
 func registerHTTPServer(
 	server *httpserver.Server,
 ) {
-	// The HTTP server lifecycle is registered by NewServer.
 }
 
 func registerLifecycle(
@@ -142,14 +178,15 @@ func registerOutboxPublisher(
 	lifecycle.Append(
 		fx.Hook{
 			OnStart: func(ctx context.Context) error {
-				publisherCtx, publisherCancel := context.WithCancel(
-					context.Background(),
-				)
+				publisherCtx, publisherCancel :=
+					context.WithCancel(context.Background())
 
 				cancel = publisherCancel
 
 				go func() {
-					if err := publisher.Run(publisherCtx); err != nil &&
+					if err := publisher.Run(
+						publisherCtx,
+					); err != nil &&
 						publisherCtx.Err() == nil {
 						log.Printf(
 							"outbox publisher stopped with error: %v",
@@ -189,14 +226,15 @@ func registerWagerConsumer(
 	lifecycle.Append(
 		fx.Hook{
 			OnStart: func(ctx context.Context) error {
-				consumerCtx, consumerCancel := context.WithCancel(
-					context.Background(),
-				)
+				consumerCtx, consumerCancel :=
+					context.WithCancel(context.Background())
 
 				cancel = consumerCancel
 
 				go func() {
-					if err := consumer.Run(consumerCtx); err != nil &&
+					if err := consumer.Run(
+						consumerCtx,
+					); err != nil &&
 						consumerCtx.Err() == nil {
 						log.Printf(
 							"wager consumer stopped with error: %v",
@@ -219,6 +257,88 @@ func registerWagerConsumer(
 
 				log.Println(
 					"wager consumer stopped",
+				)
+
+				return nil
+			},
+		},
+	)
+}
+
+func registerPendingReferenceWorker(
+	lifecycle fx.Lifecycle,
+	worker *application.PendingReferenceWorker,
+) {
+	var cancel context.CancelFunc
+
+	lifecycle.Append(
+		fx.Hook{
+			OnStart: func(ctx context.Context) error {
+				workerCtx, workerCancel :=
+					context.WithCancel(context.Background())
+
+				cancel = workerCancel
+
+				go func() {
+					ticker := time.NewTicker(
+						pendingReferenceWorkerInterval,
+					)
+					defer ticker.Stop()
+
+					for {
+						processed, err := worker.ProcessBatch(
+							workerCtx,
+							pendingReferenceWorkerBatch,
+						)
+
+						if err != nil {
+							if workerCtx.Err() != nil {
+								return
+							}
+
+							log.Printf(
+								"pending reference worker error: %v",
+								err,
+							)
+
+							select {
+							case <-workerCtx.Done():
+								return
+							case <-ticker.C:
+							}
+
+							continue
+						}
+
+						if processed > 0 {
+							log.Printf(
+								"pending reference worker processed %d transaction(s)",
+								processed,
+							)
+						}
+
+						select {
+						case <-workerCtx.Done():
+							return
+						case <-ticker.C:
+						}
+					}
+				}()
+
+				log.Println(
+					"pending reference worker started",
+				)
+
+				return nil
+			},
+
+			OnStop: func(ctx context.Context) error {
+				if cancel != nil {
+					cancel()
+				}
+
+				log.Println(
+					"pending reference worker stopped",
 				)
 
 				return nil
