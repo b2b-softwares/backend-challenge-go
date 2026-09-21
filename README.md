@@ -1,1247 +1,2910 @@
-Backend Challenge — Distributed Wager Processing
+# Backend Challenge — Processamento Distribuído de Apostas em Go
 
-Backend para processamento distribuído de transações de apostas, desenvolvido em Go, com foco em consistência financeira, idempotência, concorrência, processamento assíncrono, resiliência, observabilidade e desacoplamento arquitetural.
+Backend para processamento distribuído de transações de apostas, desenvolvido em Go, com foco em consistência financeira, idempotência, processamento assíncrono, concorrência segura, observabilidade e desacoplamento arquitetural.
 
-1. Visão geral
+---
 
-O sistema recebe transações de apostas por HTTP e também suporta processamento assíncrono através de SQS.
+# 1. Status do Projeto
 
-A arquitetura separa claramente:
+Projeto funcionalmente implementado e validado.
 
-domínio;
-casos de uso;
-portas/interfaces;
-adapters de infraestrutura;
-transporte HTTP;
-mensageria;
-persistência;
-autenticação;
-observabilidade;
-composição da aplicação.
+Principais componentes implementados:
 
-O objetivo é permitir evolução e substituição de componentes de infraestrutura sem alterar as regras de negócio.
+- Go 1.25
+- Uber Fx
+- HTTP REST API
+- Keycloak / OIDC
+- PostgreSQL
+- Money decimal exato
+- Wallet
+- Wager Transactions
+- Append-only Ledger
+- Idempotency
+- Inbox Pattern
+- Outbox Pattern
+- AWS SQS
+- MiniStack para ambiente local
+- Consumer assíncrono
+- DLQ
+- Redelivery
+- Pending Reference Worker
+- Docker Compose
+- OpenTelemetry
+- Prometheus
+- Grafana
+- Jaeger
+- Unit Tests
+- Integration Tests
+- E2E
+- Race Detector
 
-Por exemplo:
+Validações realizadas:
 
-SQS
-  ↓
-MessageConsumer
-  ↓
-Application
+```bash
+go test ./...
+```
 
-pode futuramente ser substituído por:
+e:
 
-RabbitMQ
-  ↓
-MessageConsumer
-  ↓
-Application
-
-sem alterar o domínio ou os casos de uso.
-
-2. Principais requisitos atendidos
-
-O projeto contempla:
-
-Go 1.25
-Uber Fx
-HTTP REST
-Keycloak / OpenID Connect
-OAuth 2.0 Client Credentials
-PostgreSQL
-AWS SQS
-filas FIFO
-DLQ
-MiniStack para AWS local
-Docker Compose
-migrations
-Money com precisão exata
-idempotência persistente
-Inbox Pattern
-Outbox Pattern
-Ledger append-only
-controle de concorrência da wallet
-prevenção de double spend
-processamento assíncrono
-retry/redelivery
-pending reference worker
-OpenTelemetry
-Prometheus
-Grafana
-Jaeger
-testes unitários
-testes de integração
-testes de concorrência
+```bash
 go test -race ./...
-validação E2E.
-3. Arquitetura
+```
 
-A aplicação segue uma arquitetura em camadas baseada em Ports and Adapters / Hexagonal Architecture, combinada com princípios de Clean Architecture.
+---
 
-                         ┌──────────────────────┐
-                         │       Clients        │
-                         └──────────┬───────────┘
-                                    │
-                                    ▼
-                         ┌──────────────────────┐
-                         │     HTTP Adapter     │
-                         │   REST / OIDC Auth   │
-                         └──────────┬───────────┘
-                                    │
-                                    ▼
-┌──────────────────────────────────────────────────────────┐
-│                    APPLICATION LAYER                     │
-│                                                          │
-│  WagerService                                            │
-│  ReversalService                                         │
-│  WagerConsumer                                           │
-│  PendingReferenceWorker                                  │
-│                                                          │
-│  Use cases + orchestration                               │
-└───────────────┬──────────────────────────┬───────────────┘
-                │                          │
-                ▼                          ▼
-       ┌─────────────────┐       ┌─────────────────────┐
-       │     DOMAIN      │       │       PORTS         │
-       │                 │       │                     │
-       │ Money           │       │ WalletRepository    │
-       │ Wallet          │       │ TransactionRepo     │
-       │ Wager           │       │ LedgerRepository    │
-       │ Ledger          │       │ InboxRepository     │
-       │ Errors          │       │ OutboxRepository    │
-       │ Rules           │       │ MessageConsumer     │
-       └─────────────────┘       │ MessagePublisher    │
-                                 │ TransactionManager  │
-                                 └──────────┬──────────┘
-                                            │
-                         ┌──────────────────┼──────────────────┐
-                         │                  │                  │
-                         ▼                  ▼                  ▼
-                 ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
-                 │  PostgreSQL  │   │     SQS      │   │   Keycloak   │
-                 │    Adapter   │   │    Adapter   │   │    Adapter   │
-                 └──────────────┘   └──────────────┘   └──────────────┘
+# 2. Objetivo
 
+O projeto implementa uma API para processamento de apostas com requisitos típicos de sistemas financeiros e distribuídos.
 
-                    OBSERVABILITY CROSS-CUTTING
+O sistema precisa garantir que uma mesma operação não produza efeitos financeiros duplicados mesmo quando ocorrerem:
 
+- retries HTTP;
+- mensagens duplicadas;
+- redelivery do SQS;
+- concorrência;
+- reinicialização da aplicação;
+- falhas de infraestrutura;
+- falha durante o processamento;
+- falha após commit;
+- indisponibilidade temporária de serviços.
+
+A arquitetura utiliza persistência transacional, idempotência, Inbox, Outbox e processamento assíncrono para atingir esses objetivos.
+
+---
+
+# 3. Arquitetura
+
+Visão simplificada:
+
+```text
+                         CLIENT
+                           │
+                           ▼
+                    ┌─────────────┐
+                    │  Keycloak   │
+                    │    OIDC     │
+                    └──────┬──────┘
+                           │
+                           │ Bearer Token
+                           ▼
+                    ┌─────────────┐
+                    │  HTTP API   │
+                    └──────┬──────┘
+                           │
+                           ▼
+                    ┌─────────────┐
+                    │ Idempotency │
+                    └──────┬──────┘
+                           │
+                           ▼
+                    ┌─────────────┐
+                    │ Application │
+                    │   Service   │
+                    └──────┬──────┘
+                           │
+                           ▼
+                    ┌─────────────┐
+                    │ PostgreSQL  │
+                    │             │
+                    │ Wallet      │
+                    │ Transaction │
+                    │ Ledger      │
+                    │ Inbox       │
+                    │ Outbox      │
+                    └──────┬──────┘
+                           │
+                           │ Outbox
+                           ▼
+                    ┌─────────────┐
+                    │   SQS       │
+                    └──────┬──────┘
+                           │
+                           ▼
+                    ┌─────────────┐
+                    │  Consumer   │
+                    └──────┬──────┘
+                           │
+                           ▼
+                    ┌─────────────┐
+                    │    Inbox    │
+                    └──────┬──────┘
+                           │
+                           ▼
+                    ┌─────────────┐
+                    │ Application │
+                    └─────────────┘
+```
+
+Observabilidade:
+
+```text
 Application
-    │
-    ├── OpenTelemetry Traces ──► OTel Collector ──► Jaeger
-    │
-    └── OpenTelemetry Metrics ─► OTel Collector ──► Prometheus
-                                                       │
-                                                       ▼
-                                                    Grafana
-4. Princípios arquiteturais
-4.1 Dependency Inversion
-
-O domínio não conhece:
-
-PostgreSQL;
-SQS;
-HTTP;
-Keycloak;
-Uber Fx;
-OpenTelemetry.
-
-Esses componentes dependem das abstrações definidas pela aplicação.
-
-4.2 Ports and Adapters
-
-Interfaces definem as fronteiras entre aplicação e infraestrutura.
-
-Exemplos conceituais:
-
-Application
-    │
-    ├── WalletRepository
-    ├── WagerTransactionRepository
-    ├── LedgerRepository
-    ├── IdempotencyRepository
-    ├── InboxRepository
-    ├── OutboxRepository
-    ├── TransactionManager
-    ├── MessageConsumer
-    └── MessagePublisher
-
-Implementações ficam nos adapters.
-
-4.3 Single Responsibility
-
-Cada componente possui responsabilidade específica.
-
-Exemplos:
-
-WagerService
-    → regras/orquestração da aposta
-
-WagerConsumer
-    → consumo e lifecycle da mensagem
-
-OutboxPublisher
-    → publicação dos eventos persistidos
-
-PendingReferenceWorker
-    → processamento de referências pendentes
-
-HTTP Handler
-    → transporte, parsing e validação de entrada
-
-PostgreSQL repositories
-    → persistência
-
-SQS adapters
-    → mensageria
-4.4 Composition Root
-
-Uber Fx é utilizado para composição da aplicação.
-
-A infraestrutura é montada em:
-
-cmd/app
-
-O domínio não depende de Fx.
-
-5. Fluxo síncrono
-
-Fluxo principal:
-
-Client
-  │
-  │ POST /wagering/transactions
-  ▼
-HTTP Handler
-  │
-  ├── Authorization
-  ├── Idempotency-Key
-  ├── JSON validation
-  ├── UUID validation
-  ├── Currency validation
-  └── Money parsing
-  │
-  ▼
-WagerService
-  │
-  ├── Idempotency
-  ├── Wallet
-  ├── Transaction
-  ├── Ledger
-  └── Outbox
-  │
-  ▼
-PostgreSQL Transaction
-  │
-  └── COMMIT
-  │
-  ▼
-HTTP Response
-
-A operação financeira e seus registros relacionados são persistidos de forma transacional.
-
-6. Fluxo assíncrono
-
-O processamento assíncrono utiliza SQS.
-
-Producer
-   │
-   ▼
-wager-transactions.fifo
-   │
-   ▼
-WagerConsumer
-   │
-   ▼
-Inbox
-   │
-   ├── duplicate
-   │      └── delete/replay
-   │
-   └── new message
-          │
-          ▼
-       Claim
-          │
-          ▼
-     WagerService
-          │
-          ▼
-     DB Transaction
-          │
-          ├── Wallet
-          ├── Transaction
-          ├── Ledger
-          ├── Idempotency
-          └── Inbox
-          │
-          ▼
-        COMMIT
-          │
-          ▼
-     Delete SQS
-
-Em caso de erro antes do commit:
-
-SQS message
-    ↓
-processing error
-    ↓
-message NOT deleted
-    ↓
-redelivery
-    ↓
-retry
-7. Idempotência
-
-A idempotência é persistente.
-
-A chave é associada ao payload recebido.
-
-O sistema calcula um hash do payload.
-
-Fluxo:
-
-Idempotency-Key
-       │
-       ▼
-Existe?
- ┌─────┴─────┐
- │           │
- NÃO         SIM
- │           │
- ▼           ▼
-Processa   Compara payload hash
-             │
-       ┌─────┴─────┐
-       │           │
-      igual      diferente
-       │           │
-       ▼           ▼
-     Replay       409
-
-Isso impede:
-
-processamento duplicado;
-débito duplicado;
-inconsistência financeira;
-reutilização indevida de uma chave para outro payload.
-8. Money
-
-Valores monetários não utilizam float.
-
-Exemplo:
-
-10.00
-50.00
-100.00
-
-são tratados com precisão exata.
-
-Isso evita erros clássicos de representação binária de valores financeiros.
-
-9. Wallet e concorrência
-
-A atualização da wallet ocorre de forma transacional e concorrente-safe.
-
-O sistema não utiliza global mutex para controlar saldo.
-
-A consistência é garantida no banco.
-
-Exemplo validado:
-
-Saldo inicial: R$90,00
-
-Aposta A: R$50,00
-Aposta B: R$50,00
-
-Resultado:
-
-A → PROCESSED
-B → REJECTED
-
-Saldo final: R$40,00
-
-Isso comprova que duas requisições concorrentes não conseguem consumir o mesmo saldo.
-
-10. Ledger
-
-O ledger é append-only.
-
-As operações financeiras geram registros que permitem rastrear os movimentos.
-
-O ledger não deve ser tratado como um simples campo de saldo.
-
-A wallet representa o estado atual.
-
-O ledger representa o histórico financeiro.
-
-11. Inbox Pattern
-
-O Inbox Pattern garante idempotência no consumo de mensagens.
-
-A mensagem recebida é identificada através do payload/hash e persistida antes do processamento.
-
-Estados conceituais:
-
-RECEIVED
-   ↓
-PROCESSING
-   ↓
-PROCESSED
-
-Em caso de erro:
-
-PROCESSING
-   ↓
-erro
-   ↓
-mensagem permanece na fila
-12. Outbox Pattern
-
-Eventos de negócio não são publicados diretamente antes do commit do banco.
-
-Eles são persistidos no Outbox dentro da mesma transação.
-
-Business operation
-      │
-      ├── Database changes
-      │
-      └── Outbox event
-             │
-             ▼
-           COMMIT
-             │
-             ▼
-       Outbox Publisher
-             │
-             ▼
-           SQS
-
-Isso evita o problema clássico:
-
-Banco commitou
-MAS
-mensagem não foi publicada
-13. Autenticação
-
-A API utiliza Keycloak como Identity Provider.
-
-Fluxo:
-
-Client
-   │
-   │ client_credentials
-   ▼
-Keycloak
-   │
-   │ access_token
-   ▼
-Client
-   │
-   │ Authorization: Bearer <token>
-   ▼
-API
-   │
-   ▼
-Token validation
-   │
-   ▼
-Endpoint
-
-Realm:
-
-backend-challenge
-
-Client:
-
-backend-api
-14. Observabilidade
-
-A aplicação utiliza OpenTelemetry.
-
-API
- │
- ├── traces
- │
- └── metrics
-       │
-       ▼
+     │
+     ▼
+OpenTelemetry
+     │
+     ▼
 OTel Collector
- │
- ├──────────────► Jaeger
- │
- └──────────────► Prometheus
-                         │
-                         ▼
-                      Grafana
-15. Métricas principais
+     │
+     ├──────────────► Jaeger
+     │
+     └──────────────► Prometheus
+                           │
+                           ▼
+                        Grafana
+```
 
-Métricas HTTP:
+---
 
-http_server_request_duration_seconds
-http_server_request_body_size_bytes
-http_server_response_body_size_bytes
+# 4. Princípios Arquiteturais
 
-Métricas Wager:
+O projeto segue princípios de:
 
-wager_processing_duration_seconds
-wager_transactions_processed_total
-wager_transactions_total
+- Clean Architecture;
+- Hexagonal Architecture;
+- Ports and Adapters;
+- SOLID;
+- Dependency Inversion;
+- DDD Lite;
+- Repository Pattern;
+- Transactional Integrity;
+- Inbox Pattern;
+- Outbox Pattern;
+- Idempotent Consumer;
+- Event-Driven Architecture.
 
-Métricas SQS:
+O domínio não depende diretamente de:
 
-sqs_message_processing_duration_seconds
-sqs_messages_received_total
-sqs_messages_processed_total
-sqs_messages_deleted_total
+- HTTP;
+- PostgreSQL;
+- SQS;
+- AWS;
+- Docker;
+- Uber Fx;
+- OpenTelemetry;
+- Keycloak.
 
-Métricas Inbox:
+---
 
-inbox_messages_received_total
-inbox_messages_processed_total
-16. Grafana
+# 5. Estrutura do Projeto
 
-Dashboard:
-
-Backend Challenge - Distributed Wager Processing
-
-URL local:
-
-http://localhost:3000/dashboards/f/dfyx604lqnmkgf/backend-challenge
-
-Painéis:
-
-HTTP Latency
-  P95
-  P50
-
-Wager Transactions
-  Total
-  Processed
-
-Wager Processing Latency
-  P95
-  P50
-
-Wager Business Outcomes
-  Processed
-
-SQS Consumer
-  Received
-  Processed
-  Deleted
-
-SQS Processing Latency
-  P95
-
-Inbox / Idempotent Consumer
-  Received
-  Processed
-17. Estrutura de infraestrutura
-Docker Compose
+```text
+.
+├── cmd/
+│   └── app/
+│       └── main.go
 │
-├── postgres
+├── internal/
+│   ├── application/
+│   │   ├── wager_service.go
+│   │   ├── wager_consumer.go
+│   │   ├── reversal_service.go
+│   │   └── pending_reference_worker.go
+│   │
+│   ├── domain/
+│   │   ├── money.go
+│   │   ├── wallet.go
+│   │   ├── transaction.go
+│   │   └── errors.go
+│   │
+│   ├── ports/
+│   │   ├── repositories.go
+│   │   ├── queue.go
+│   │   └── transaction.go
+│   │
+│   ├── adapters/
+│   │   ├── postgres/
+│   │   └── sqs/
+│   │
+│   ├── http/
+│   │   └── handler.go
+│   │
+│   ├── config/
+│   │
+│   └── observability/
+│       └── observability.go
 │
-├── ministack
+├── migrations/
 │
-├── sqs-init
+├── infra/
+│   ├── grafana/
+│   ├── prometheus/
+│   ├── otel-collector/
+│   ├── keycloak/
+│   └── ministack/
 │
-├── keycloak
+├── tests/
+│   ├── unit/
+│   ├── integration/
+│   └── e2e/
 │
-├── jaeger
-│
-├── otel-collector
-│
-├── prometheus
-│
-├── grafana
-│
-└── api
-18. Pré-requisitos
+├── docker-compose.yml
+├── Dockerfile
+├── go.mod
+└── README.md
+```
 
-Para execução local:
+---
 
-Docker
-Docker Compose
-Go 1.25
-Git
-curl
-jq
+# 6. Tecnologias
 
-O projeto foi validado em ambiente Docker Desktop/Linux.
+| Tecnologia | Utilização |
+|---|---|
+| Go 1.25 | Linguagem |
+| Uber Fx | Dependency Injection / Lifecycle |
+| PostgreSQL | Persistência transacional |
+| MiniStack | Simulação AWS local |
+| SQS | Mensageria |
+| Keycloak | OIDC / OAuth2 |
+| OpenTelemetry | Observabilidade |
+| Prometheus | Métricas |
+| Grafana | Dashboards |
+| Jaeger | Distributed Tracing |
+| Docker | Containerização |
+| Docker Compose | Ambiente local |
 
-19. Subindo o ambiente
+---
 
-Na raiz:
+# 7. Pré-requisitos
 
-cd /media/data/_GIT_/backend-challenge-go
+Para executar o projeto localmente:
 
-Subir infraestrutura:
+- Go 1.25+
+- Docker
+- Docker Compose
+- Git
+- curl
+- PostgreSQL client opcional
+- AWS CLI opcional para inspeção do SQS
 
+Verificar Go:
+
+```bash
+go version
+```
+
+Verificar Docker:
+
+```bash
+docker --version
+```
+
+Verificar Compose:
+
+```bash
+docker compose version
+```
+
+---
+
+# 8. Clonar o Projeto
+
+```bash
+git clone git@github.com:b2b-softwares/backend-challenge-go.git
+cd backend-challenge-go
+```
+
+---
+
+# 9. Subir o Ambiente
+
+Inicializar toda a infraestrutura:
+
+```bash
 docker compose up -d
+```
 
 Verificar containers:
 
+```bash
 docker compose ps
+```
 
-Esperado:
+Ver logs:
 
-postgres
-ministack
-keycloak
-jaeger
-otel-collector
-prometheus
-grafana
-api
-20. Logs da aplicação
-docker logs -f backend-challenge-api
+```bash
+docker compose logs -f
+```
 
-Na inicialização devem aparecer componentes como:
+Ver logs somente da API:
 
-database migrations completed
-OpenTelemetry initialized
-outbox publisher started
-wager consumer started
-pending reference worker started
-HTTP server listening on :8080
-21. Health check
+```bash
+docker compose logs -f api
+```
 
-Sem autenticação:
+---
 
+# 10. Serviços Locais
+
+Após iniciar o ambiente:
+
+| Serviço | URL |
+|---|---|
+| API | http://localhost:8080 |
+| Grafana | http://localhost:3000 |
+| Prometheus | http://localhost:9090 |
+| Jaeger | http://localhost:16686 |
+| Keycloak | http://localhost:8081 |
+| MiniStack | http://localhost:4566 |
+| OTel Collector Metrics | http://localhost:8889/metrics |
+
+---
+
+# 11. Health Checks
+
+Health:
+
+```bash
+curl -i http://localhost:8080/health
+```
+
+Readiness:
+
+```bash
 curl -i http://localhost:8080/health/ready
+```
 
-Deve retornar:
+A aplicação deve retornar:
 
-401 Unauthorized
+```json
+{
+  "status": "UP"
+}
+```
 
-Isso confirma que o endpoint protegido está exigindo autenticação.
+---
 
-22. Obtendo token Keycloak
+# 12. Fase 0 — Validar Infraestrutura
+
+Primeiro confirme se todos os containers estão funcionando:
+
+```bash
+docker compose ps
+```
+
+Verificar PostgreSQL:
+
+```bash
+docker compose logs postgres
+```
+
+Verificar MiniStack:
+
+```bash
+docker compose logs ministack
+```
+
+Verificar Keycloak:
+
+```bash
+docker compose logs keycloak
+```
+
+Verificar OTel:
+
+```bash
+docker compose logs otel-collector
+```
+
+Verificar Prometheus:
+
+```bash
+docker compose logs prometheus
+```
+
+Verificar Grafana:
+
+```bash
+docker compose logs grafana
+```
+
+---
+
+# 13. Fase 1 — Banco de Dados e Migrations
+
+As migrations são executadas durante a inicialização da aplicação.
+
+Verificar logs:
+
+```bash
+docker compose logs api
+```
+
+Procurar mensagens relacionadas às migrations:
+
+```bash
+docker compose logs api | grep -i migration
+```
+
+---
+
+# 14. Validar PostgreSQL
+
+Entrar no PostgreSQL:
+
+```bash
+docker compose exec postgres psql \
+  -U postgres \
+  -d backend_challenge
+```
+
+Listar tabelas:
+
+```sql
+\dt
+```
+
+Sair:
+
+```sql
+\q
+```
+
+---
+
+# 15. Fase 2 — Testar OIDC / Keycloak
+
+A API exige autenticação.
+
+Sem token:
+
+```bash
+curl -i http://localhost:8080/health/ready
+```
+
+A chamada autenticada deve exigir:
+
+```text
+Authorization: Bearer <token>
+```
+
+---
+
+# 16. Obter Token do Keycloak
+
+O ambiente local disponibiliza um client configurado para `client_credentials`.
+
+Exemplo:
+
+```bash
+curl -s \
+  -X POST \
+  "http://localhost:8081/realms/backend-challenge/protocol/openid-connect/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials" \
+  -d "client_id=backend-api-client" \
+  -d "client_secret=backend-api-secret"
+```
+
+Extrair somente o token, caso `jq` esteja instalado:
+
+```bash
 TOKEN=$(curl -s \
   -X POST \
   "http://localhost:8081/realms/backend-challenge/protocol/openid-connect/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "grant_type=client_credentials" \
-  -d "client_id=backend-api" \
+  -d "client_id=backend-api-client" \
   -d "client_secret=backend-api-secret" \
   | jq -r '.access_token')
+```
 
 Validar:
 
-echo "${#TOKEN}"
+```bash
+echo "$TOKEN"
+```
 
-O resultado deve ser maior que zero.
+---
 
-23. Health check autenticado
+# 17. Fase 3 — Testar API Autenticada
+
+Exemplo:
+
+```bash
 curl -i \
   -H "Authorization: Bearer $TOKEN" \
   http://localhost:8080/health/ready
+```
 
 Resultado esperado:
 
+```json
 {
   "status": "UP"
 }
-24. Testes automatizados
+```
 
-Executar toda a suíte:
+---
 
-go test ./...
+# 18. Endpoint de Wager
 
-Executar com race detector:
+Endpoint:
 
-go test -race ./...
+```text
+POST /wagering/transactions
+```
 
-O -race é especialmente importante neste desafio porque existem:
+Headers obrigatórios:
 
-processamento concorrente;
-workers;
-consumidores;
-acesso concorrente a wallet;
-publicação assíncrona;
-operações transacionais.
-25. Testes por camada
-25.1 Testes unitários
-go test ./tests/unit/...
+```text
+Authorization: Bearer <token>
+Idempotency-Key: <unique-key>
+Content-Type: application/json
+```
 
-Objetivo:
+Payload:
 
-domínio;
-regras;
-serviços;
-validações;
-idempotência;
-comportamento de negócio.
-25.2 Testes de integração PostgreSQL
-go test ./tests/integration/postgres/...
+```json
+{
+  "externalTransactionId": "external-001",
+  "providerId": "provider-001",
+  "walletId": "WALLET_UUID",
+  "playerId": "PLAYER_UUID",
+  "roundId": "round-001",
+  "gameId": "game-001",
+  "amount": "10.00",
+  "currency": "BRL"
+}
+```
 
-Objetivo:
+---
 
-repositories;
-transações;
-concorrência;
-wallet;
-idempotência;
-persistência.
-25.3 Race detector
-go test -race ./...
+# 19. Fase 4 — Primeira Aposta
 
-Objetivo:
+Defina as variáveis:
 
-detectar data races em toda a aplicação.
+```bash
+WALLET_ID="<wallet-uuid>"
+PLAYER_ID="<player-uuid>"
+```
 
-26. Teste manual de aposta HTTP
+Execute:
 
-Primeiro obtenha:
-
-TOKEN=...
-
-Crie/obtenha uma wallet de teste conforme os dados de ambiente do desafio.
-
-Depois:
-
+```bash
 curl -i \
   -X POST \
   http://localhost:8080/wagering/transactions \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -H "Idempotency-Key: e2e-test-001" \
-  -d '{
-    "externalTransactionId": "e2e-ext-001",
-    "providerId": "e2e-provider",
-    "walletId": "<WALLET_UUID>",
-    "playerId": "<PLAYER_UUID>",
-    "roundId": "e2e-round-001",
-    "gameId": "e2e-game-001",
-    "amount": "10.00",
-    "currency": "BRL"
-  }'
+  -H "Idempotency-Key: wager-001" \
+  -d "{
+    \"externalTransactionId\": \"external-001\",
+    \"providerId\": \"provider-001\",
+    \"walletId\": \"$WALLET_ID\",
+    \"playerId\": \"$PLAYER_ID\",
+    \"roundId\": \"round-001\",
+    \"gameId\": \"game-001\",
+    \"amount\": \"10.00\",
+    \"currency\": \"BRL\"
+  }"
+```
 
-Resultado esperado:
+Resposta esperada:
 
+```json
 {
   "transactionId": "...",
   "status": "PROCESSED",
-  "balance": "...",
+  "balance": "90.00",
   "currency": "BRL",
   "idempotentReplay": false
 }
-27. Teste de idempotência
+```
 
-Execute exatamente a mesma requisição novamente, mantendo:
+O saldo depende do saldo inicial da wallet utilizada no ambiente.
 
-Idempotency-Key
-payload
+---
 
-iguais.
+# 20. Fase 5 — Testar Idempotência
 
-Esperado:
+Reenvie exatamente a mesma requisição com a mesma chave:
 
+```bash
+curl -i \
+  -X POST \
+  http://localhost:8080/wagering/transactions \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: wager-001" \
+  -d "{
+    \"externalTransactionId\": \"external-001\",
+    \"providerId\": \"provider-001\",
+    \"walletId\": \"$WALLET_ID\",
+    \"playerId\": \"$PLAYER_ID\",
+    \"roundId\": \"round-001\",
+    \"gameId\": \"game-001\",
+    \"amount\": \"10.00\",
+    \"currency\": \"BRL\"
+  }"
+```
+
+A resposta deve indicar replay:
+
+```json
 {
   "idempotentReplay": true
 }
+```
 
-A transação não deve ser criada novamente.
+A wallet não deve ser debitada novamente.
 
-28. Teste de conflito de idempotência
+---
 
-Mantenha a mesma:
+# 21. Fase 6 — Testar Idempotency Conflict
 
-Idempotency-Key
+Use a mesma chave:
 
-mas altere:
+```text
+wager-001
+```
 
-amount
+mas altere o valor:
 
-ou outro campo do payload.
-
-Esperado:
-
-HTTP 409
-
-Com mensagem equivalente a:
-
-idempotency key was already used with a different payload
-
-O saldo não deve ser alterado pela segunda requisição.
-
-29. Teste de saldo insuficiente
-
-Utilize uma wallet com saldo menor que o valor da aposta.
-
-Esperado:
-
-HTTP 409
-
-e:
-
-insufficient balance
-
-A transação deve ser registrada como rejeitada, sem lançamento financeiro indevido.
-
-30. Teste de concorrência
-
-O cenário crítico é:
-
-saldo = R$90
-
-aposta A = R$50
-aposta B = R$50
-
-As duas operações devem ser executadas simultaneamente.
+```json
+"amount": "20.00"
+```
 
 Resultado esperado:
 
-uma PROCESSADA
-uma REJECTED
+```http
+409 Conflict
+```
 
-saldo final = R$40
+O saldo não deve sofrer novo débito.
 
-Executar a suíte de concorrência:
+Isso valida:
 
+```text
+Idempotency-Key
+        +
+Payload Hash
+```
+
+---
+
+# 22. Fase 7 — Testar Saldo Insuficiente
+
+Execute uma aposta com valor superior ao saldo disponível:
+
+```bash
+curl -i \
+  -X POST \
+  http://localhost:8080/wagering/transactions \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: insufficient-001" \
+  -d "{
+    \"externalTransactionId\": \"external-insufficient-001\",
+    \"providerId\": \"provider-001\",
+    \"walletId\": \"$WALLET_ID\",
+    \"playerId\": \"$PLAYER_ID\",
+    \"roundId\": \"round-insufficient\",
+    \"gameId\": \"game-001\",
+    \"amount\": \"999999.99\",
+    \"currency\": \"BRL\"
+  }"
+```
+
+Resultado esperado:
+
+```http
+409 Conflict
+```
+
+Nenhum débito financeiro deve ser realizado.
+
+---
+
+# 23. Fase 8 — Testar Concorrência
+
+Um dos testes importantes é executar duas apostas simultâneas.
+
+Exemplo conceitual:
+
+```text
+Saldo = 90
+
+Request A = 50
+Request B = 50
+```
+
+Executar duas chamadas em paralelo:
+
+```bash
+curl -s \
+  -X POST \
+  http://localhost:8080/wagering/transactions \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: concurrent-a" \
+  -d "{
+    \"externalTransactionId\": \"concurrent-a\",
+    \"providerId\": \"provider-001\",
+    \"walletId\": \"$WALLET_ID\",
+    \"playerId\": \"$PLAYER_ID\",
+    \"roundId\": \"round-concurrent-a\",
+    \"gameId\": \"game-001\",
+    \"amount\": \"50.00\",
+    \"currency\": \"BRL\"
+  }" &
+
+curl -s \
+  -X POST \
+  http://localhost:8080/wagering/transactions \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: concurrent-b" \
+  -d "{
+    \"externalTransactionId\": \"concurrent-b\",
+    \"providerId\": \"provider-001\",
+    \"walletId\": \"$WALLET_ID\",
+    \"playerId\": \"$PLAYER_ID\",
+    \"roundId\": \"round-concurrent-b\",
+    \"gameId\": \"game-001\",
+    \"amount\": \"50.00\",
+    \"currency\": \"BRL\"
+  }" &
+
+wait
+```
+
+Com saldo inicial de R$90, o resultado esperado é:
+
+```text
+Uma operação  → PROCESSED
+Uma operação  → REJECTED
+
+Saldo final → R$40
+```
+
+---
+
+# 24. Fase 9 — Validar Ledger
+
+Consultar as entradas:
+
+```sql
+SELECT
+    *
+FROM ledger
+ORDER BY created_at;
+```
+
+O ledger deve manter o histórico das movimentações.
+
+Ele é append-only.
+
+---
+
+# 25. Fase 10 — Validar Transactions
+
+Consultar:
+
+```sql
+SELECT
+    *
+FROM wager_transactions
+ORDER BY created_at DESC;
+```
+
+Verificar os estados:
+
+```text
+PROCESSED
+REJECTED
+```
+
+---
+
+# 26. Fase 11 — Validar Wallet
+
+Consultar:
+
+```sql
+SELECT
+    *
+FROM wallets;
+```
+
+Confirmar que:
+
+- saldo não ficou negativo;
+- concorrência foi corretamente serializada;
+- replay não produziu novo débito.
+
+---
+
+# 27. Fase 12 — Validar Idempotency
+
+Consultar:
+
+```sql
+SELECT
+    *
+FROM idempotency_keys
+ORDER BY created_at DESC;
+```
+
+Verificar:
+
+- chave;
+- payload hash;
+- transaction;
+- resultado;
+- replay.
+
+---
+
+# 28. Fase 13 — Validar Inbox
+
+Consultar:
+
+```sql
+SELECT
+    *
+FROM inbox
+ORDER BY created_at DESC;
+```
+
+Verificar os estados:
+
+```text
+RECEIVED
+PROCESSING
+PROCESSED
+```
+
+---
+
+# 29. Fase 14 — Validar Outbox
+
+Consultar:
+
+```sql
+SELECT
+    *
+FROM outbox
+ORDER BY created_at DESC;
+```
+
+O fluxo esperado é:
+
+```text
+PENDING
+   │
+   ▼
+Published
+```
+
+---
+
+# 30. Fase 15 — Validar SQS
+
+Listar filas através do MiniStack/AWS CLI:
+
+```bash
+aws --endpoint-url=http://localhost:4566 sqs list-queues
+```
+
+Se o ambiente exigir região:
+
+```bash
+aws \
+  --endpoint-url=http://localhost:4566 \
+  --region us-east-1 \
+  sqs list-queues
+```
+
+---
+
+# 31. Inspecionar Mensagens SQS
+
+Exemplo:
+
+```bash
+aws \
+  --endpoint-url=http://localhost:4566 \
+  --region us-east-1 \
+  sqs receive-message \
+  --queue-url "<QUEUE_URL>"
+```
+
+O nome exato da fila deve ser obtido através do ambiente configurado.
+
+---
+
+# 32. Fase 16 — Validar Consumer
+
+Ver logs:
+
+```bash
+docker compose logs -f api
+```
+
+O consumer deve:
+
+```text
+Receive message
+     │
+     ▼
+Validate
+     │
+     ▼
+Inbox
+     │
+     ▼
+Claim
+     │
+     ▼
+Process
+     │
+     ▼
+Mark Processed
+     │
+     ▼
+Delete SQS
+```
+
+---
+
+# 33. Fase 17 — Redelivery
+
+O consumidor não deve depender de entrega exactly-once.
+
+O comportamento esperado é:
+
+```text
+Message
+   │
+   ▼
+Processing
+   │
+   X
+Failure
+   │
+   ▼
+Redelivery
+```
+
+Quando a mesma mensagem chegar novamente, a Inbox deve impedir a duplicação
+do efeito financeiro.
+
+---
+
+# 34. Fase 18 — DLQ
+
+Mensagens que falharem repetidamente devem ser direcionadas à DLQ conforme
+a política configurada no ambiente.
+
+Verificar filas:
+
+```bash
+aws \
+  --endpoint-url=http://localhost:4566 \
+  --region us-east-1 \
+  sqs list-queues
+```
+
+A DLQ deve ser monitorada para identificar mensagens que precisam de análise.
+
+---
+
+# 35. Fase 19 — Pending Reference Worker
+
+O worker pode ser observado através dos logs:
+
+```bash
+docker compose logs -f api
+```
+
+O fluxo esperado é:
+
+```text
+Pending Reference
+       │
+       ▼
+Worker
+       │
+       ▼
+Reference Available?
+       │
+       ├── Yes → Process
+       │
+       └── No  → Retry
+```
+
+---
+
+# 36. Fase 20 — Unit Tests
+
+Executar todos os testes unitários:
+
+```bash
+go test ./tests/unit/...
+```
+
+Executar com verbose:
+
+```bash
+go test -v ./tests/unit/...
+```
+
+---
+
+# 37. Fase 21 — Integration Tests
+
+Executar:
+
+```bash
+go test ./tests/integration/...
+```
+
+Verbose:
+
+```bash
+go test -v ./tests/integration/...
+```
+
+---
+
+# 38. Fase 22 — Todos os Testes
+
+Executar:
+
+```bash
+go test ./...
+```
+
+Esse é o primeiro regression gate.
+
+---
+
+# 39. Fase 23 — Race Detector
+
+Executar:
+
+```bash
 go test -race ./...
-31. Teste do Outbox
+```
 
-Depois de processar uma aposta:
+Esse teste é obrigatório para validar o comportamento concorrente.
 
-consultar a tabela:
+Especialmente importante para:
 
-outbox_events
+- wallet;
+- consumer;
+- workers;
+- repositories;
+- goroutines;
+- processamento paralelo.
 
-Verificar:
+---
 
-event_id;
-event_type;
-aggregate_id;
-correlation_id;
-payload;
-attempts;
-published_at;
-last_error.
+# 40. Fase 24 — Build
 
-Um evento publicado corretamente deve possuir:
+Executar:
 
-published_at != NULL
-last_error = NULL
-32. Teste do Inbox
+```bash
+go build ./...
+```
 
-Enviar uma mensagem válida para a fila:
+Ou:
 
-wager-transactions.fifo
+```bash
+go build -o backend-challenge ./cmd/app
+```
 
-Verificar:
+---
 
-Inbox RECEIVED
-Inbox PROCESSED
+# 41. Fase 25 — Formatação
 
-Depois verificar que a mensagem foi removida da fila.
+Formatar o projeto:
 
-A segunda entrega da mesma mensagem não deve gerar novo efeito financeiro.
+```bash
+gofmt -w .
+```
 
-33. Teste de processamento SQS
+Verificar arquivos que precisariam ser formatados:
 
-Verificar logs:
+```bash
+gofmt -l .
+```
 
-docker logs backend-challenge-api | grep -Ei \
-'inbox|sqs|wager|consumer'
+O comando acima deve não retornar arquivos pendentes.
 
-Verificar métricas:
+---
 
-curl -s http://localhost:8889/metrics | grep -Ei \
-'wager|sqs|inbox'
-34. Teste de Outbox Publisher
+# 42. Fase 26 — Docker Build
 
-Verificar:
+Build da aplicação:
 
-docker logs backend-challenge-api | grep -Ei \
-'outbox|published'
+```bash
+docker compose build
+```
 
-Eventos publicados devem apresentar logs equivalentes a:
+Subir:
 
-outbox event ... published successfully
-35. Verificação das métricas
+```bash
+docker compose up -d
+```
 
-Collector:
+---
 
-curl -s http://localhost:8889/metrics
+# 43. Fase 27 — Logs
 
-Filtrar:
+Todos os serviços:
 
-curl -s http://localhost:8889/metrics | grep '^# HELP' | grep -Ei \
-'outbox|dlq|wallet|wager|http|sqs|inbox'
+```bash
+docker compose logs -f
+```
 
-Verificar métricas Wager:
+API:
 
-curl -s http://localhost:8889/metrics | grep '^wager_'
+```bash
+docker compose logs -f api
+```
 
-Verificar SQS:
+PostgreSQL:
 
-curl -s http://localhost:8889/metrics | grep '^sqs_'
+```bash
+docker compose logs -f postgres
+```
 
-Verificar Inbox:
+MiniStack:
 
-curl -s http://localhost:8889/metrics | grep '^inbox_'
-36. Prometheus
+```bash
+docker compose logs -f ministack
+```
+
+Keycloak:
+
+```bash
+docker compose logs -f keycloak
+```
+
+Grafana:
+
+```bash
+docker compose logs -f grafana
+```
+
+Prometheus:
+
+```bash
+docker compose logs -f prometheus
+```
+
+OTel Collector:
+
+```bash
+docker compose logs -f otel-collector
+```
+
+---
+
+# 44. Observabilidade
+
+A observabilidade utiliza:
+
+```text
+OpenTelemetry
+      │
+      ▼
+OTel Collector
+      │
+      ├────────────► Prometheus
+      │                  │
+      │                  ▼
+      │               Grafana
+      │
+      └────────────► Jaeger
+```
+
+---
+
+# 45. Grafana
 
 Abrir:
 
-http://localhost:9090
-
-Exemplos de consultas:
-
-sum(rate(wager_transactions_total[5m]))
-sum(rate(wager_transactions_total{status="processed"}[5m]))
-sum(rate(sqs_messages_received_total[5m]))
-sum(rate(sqs_messages_processed_total[5m]))
-sum(rate(inbox_messages_received_total[5m]))
-37. Grafana
-
-Abrir:
-
+```text
 http://localhost:3000
+```
 
 Dashboard:
 
+```text
 Backend Challenge - Distributed Wager Processing
+```
 
-URL:
+O dashboard contém informações de:
 
-http://localhost:3000/dashboards/f/dfyx604lqnmkgf/backend-challenge
+- HTTP;
+- Wager;
+- latency;
+- business outcomes;
+- SQS;
+- Inbox.
 
-Após gerar tráfego, observar:
+---
 
-HTTP
-P95;
-P50.
-Wager
-total;
-processadas;
-taxa de processamento;
-latência.
-SQS
-mensagens recebidas;
-processadas;
-deletadas;
-latência.
-Inbox
-mensagens recebidas;
-processadas.
-38. Jaeger
+# 46. Painéis do Grafana
+
+## HTTP Request Rate
+
+Mostra a taxa de requisições HTTP.
+
+PromQL:
+
+```promql
+sum(rate(http_server_request_duration_seconds_count[5m]))
+```
+
+---
+
+## HTTP Error Rate
+
+PromQL:
+
+```promql
+sum(
+  rate(
+    http_server_request_duration_seconds_count{
+      http_response_status_code=~"4..|5.."
+    }[5m]
+  )
+)
+/
+clamp_min(
+  sum(rate(http_server_request_duration_seconds_count[5m])),
+  1
+)
+```
+
+---
+
+## HTTP Latency P95
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le) (
+    rate(http_server_request_duration_seconds_bucket[5m])
+  )
+)
+```
+
+---
+
+## HTTP Latency P50
+
+```promql
+histogram_quantile(
+  0.50,
+  sum by (le) (
+    rate(http_server_request_duration_seconds_bucket[5m])
+  )
+)
+```
+
+---
+
+# 47. Wager Metrics
+
+Total:
+
+```promql
+sum(rate(wager_transactions_total[5m]))
+```
+
+Processadas:
+
+```promql
+sum(
+  rate(
+    wager_transactions_total{
+      status="processed"
+    }[5m]
+  )
+)
+```
+
+Rejeitadas:
+
+```promql
+sum(
+  rate(
+    wager_transactions_total{
+      status="rejected"
+    }[5m]
+  )
+)
+```
+
+---
+
+# 48. Wager Processing Latency
+
+P95:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le) (
+    rate(wager_processing_duration_seconds_bucket[5m])
+  )
+)
+```
+
+P50:
+
+```promql
+histogram_quantile(
+  0.50,
+  sum by (le) (
+    rate(wager_processing_duration_seconds_bucket[5m])
+  )
+)
+```
+
+---
+
+# 49. SQS Metrics
+
+Mensagens recebidas:
+
+```promql
+sum(rate(sqs_messages_received_total[5m]))
+```
+
+Processadas:
+
+```promql
+sum(rate(sqs_messages_processed_total[5m]))
+```
+
+Deletadas:
+
+```promql
+sum(rate(sqs_messages_deleted_total[5m]))
+```
+
+---
+
+# 50. SQS Processing Latency
+
+P95:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le) (
+    rate(sqs_message_processing_duration_seconds_bucket[5m])
+  )
+)
+```
+
+---
+
+# 51. Inbox Metrics
+
+Recebidas:
+
+```promql
+sum(rate(inbox_messages_received_total[5m]))
+```
+
+Processadas:
+
+```promql
+sum(rate(inbox_messages_processed_total[5m]))
+```
+
+---
+
+# 52. Prometheus
 
 Abrir:
 
+```text
+http://localhost:9090
+```
+
+Consultar:
+
+```promql
+up
+```
+
+Ver métricas disponíveis:
+
+```text
+http_server_request_duration_seconds
+inbox_messages_processed_total
+inbox_messages_received_total
+sqs_message_processing_duration_seconds
+sqs_messages_deleted_total
+sqs_messages_processed_total
+sqs_messages_received_total
+wager_processing_duration_seconds
+wager_transactions_processed_total
+wager_transactions_total
+```
+
+---
+
+# 53. API Metrics
+
+Endpoint:
+
+```text
+http://localhost:8080/metrics
+```
+
+Ou:
+
+```bash
+curl -s http://localhost:8080/metrics
+```
+
+Listar somente nomes de métricas:
+
+```bash
+curl -s http://localhost:8080/metrics \
+  | grep -v "^#" \
+  | cut -d'{' -f1 \
+  | cut -d' ' -f1 \
+  | sort -u
+```
+
+---
+
+# 54. OTel Collector
+
+Métricas do Collector:
+
+```bash
+curl -s http://localhost:8889/metrics
+```
+
+Ver logs:
+
+```bash
+docker compose logs -f otel-collector
+```
+
+---
+
+# 55. Jaeger
+
+Abrir:
+
+```text
 http://localhost:16686
+```
 
-Selecionar:
+Selecionar o serviço da aplicação.
 
-backend-challenge-api
+O tracing permite investigar:
 
-Usar para investigar:
+- requests;
+- latência;
+- chamadas internas;
+- dependências;
+- falhas.
 
-latência;
-chamadas HTTP;
-operações de negócio;
-comportamento distribuído;
-correlação temporal de operações.
-39. Verificação completa de observabilidade
+---
 
-Fluxo recomendado:
+# 56. Diagnóstico de uma Requisição
 
-1. Fazer uma requisição HTTP
-        ↓
-2. API processa
-        ↓
-3. Métricas são geradas
-        ↓
-4. OTel Collector recebe
-        ↓
-5. Prometheus armazena
-        ↓
-6. Grafana apresenta
+Fluxo recomendado para investigação:
 
-Para SQS:
+```text
+Grafana
+   │
+   ▼
+Detectar aumento de latency/error
+   │
+   ▼
+Jaeger
+   │
+   ▼
+Encontrar trace
+   │
+   ▼
+Identificar span lento
+   │
+   ▼
+Investigar PostgreSQL / SQS
+```
 
-1. Mensagem entra na fila
-        ↓
-2. Consumer recebe
-        ↓
-3. Inbox é atualizado
-        ↓
-4. Wager é processado
-        ↓
-5. Mensagem é deletada
-        ↓
-6. Métricas são exportadas
-        ↓
-7. Grafana apresenta
-40. Troubleshooting
-Containers
-docker compose ps
-Logs API
-docker logs -f backend-challenge-api
-Logs Grafana
-docker logs -f backend-challenge-grafana
-Logs Prometheus
-docker logs -f backend-challenge-prometheus
-Logs OTel
-docker logs -f backend-challenge-otel-collector
-Reiniciar ambiente
-docker compose restart
-Derrubar ambiente
+---
+
+# 57. Banco — Consultas Úteis
+
+Entrar:
+
+```bash
+docker compose exec postgres psql \
+  -U postgres \
+  -d backend_challenge
+```
+
+Wallets:
+
+```sql
+SELECT * FROM wallets;
+```
+
+Transactions:
+
+```sql
+SELECT *
+FROM wager_transactions
+ORDER BY created_at DESC;
+```
+
+Ledger:
+
+```sql
+SELECT *
+FROM ledger
+ORDER BY created_at DESC;
+```
+
+Idempotency:
+
+```sql
+SELECT *
+FROM idempotency_keys
+ORDER BY created_at DESC;
+```
+
+Inbox:
+
+```sql
+SELECT *
+FROM inbox
+ORDER BY created_at DESC;
+```
+
+Outbox:
+
+```sql
+SELECT *
+FROM outbox
+ORDER BY created_at DESC;
+```
+
+---
+
+# 58. Verificar Integridade Financeira
+
+Alguns pontos importantes:
+
+```text
+Wallet balance >= 0
+```
+
+Uma requisição idempotente não deve gerar:
+
+```text
+novo debit
+```
+
+Uma operação rejeitada por saldo insuficiente não deve gerar:
+
+```text
+ledger debit
+```
+
+Uma mensagem redeliverada não deve gerar:
+
+```text
+efeito financeiro duplicado
+```
+
+---
+
+# 59. Verificar Idempotência Manualmente
+
+Executar uma requisição:
+
+```text
+Idempotency-Key = test-123
+Amount = 10.00
+```
+
+Repetir:
+
+```text
+Idempotency-Key = test-123
+Amount = 10.00
+```
+
+Esperado:
+
+```text
+Primeira → Processed
+Segunda  → Replay
+```
+
+Depois:
+
+```text
+Idempotency-Key = test-123
+Amount = 20.00
+```
+
+Esperado:
+
+```text
+409 Conflict
+```
+
+---
+
+# 60. Verificar Concorrência Manualmente
+
+Para uma wallet com:
+
+```text
+Balance = 90
+```
+
+disparar:
+
+```text
+50
+50
+```
+
+simultaneamente.
+
+Esperado:
+
+```text
+Processed = 1
+Rejected  = 1
+Balance   = 40
+```
+
+---
+
+# 61. Regression Checklist
+
+Antes de considerar a versão pronta:
+
+```text
+[ ] gofmt -l .
+[ ] go test ./...
+[ ] go test -race ./...
+[ ] go build ./...
+[ ] docker compose build
+[ ] docker compose up -d
+[ ] /health
+[ ] /health/ready
+[ ] Keycloak token
+[ ] API authenticated
+[ ] Wager processed
+[ ] Idempotency replay
+[ ] Idempotency conflict
+[ ] Insufficient balance
+[ ] Concurrent wagers
+[ ] Ledger
+[ ] Inbox
+[ ] Outbox
+[ ] SQS consumer
+[ ] Redelivery
+[ ] DLQ
+[ ] Pending Reference Worker
+[ ] Prometheus
+[ ] Grafana
+[ ] Jaeger
+[ ] OpenTelemetry
+```
+
+---
+
+# 62. Troubleshooting
+
+## API não inicia
+
+Ver:
+
+```bash
+docker compose logs api
+```
+
+Verificar:
+
+- PostgreSQL;
+- migrations;
+- variáveis de ambiente;
+- conexão;
+- porta 8080.
+
+---
+
+## PostgreSQL não conecta
+
+Ver:
+
+```bash
+docker compose ps postgres
+```
+
+Logs:
+
+```bash
+docker compose logs postgres
+```
+
+Teste:
+
+```bash
+docker compose exec postgres pg_isready \
+  -U postgres
+```
+
+---
+
+## Keycloak não responde
+
+Ver:
+
+```bash
+docker compose ps keycloak
+```
+
+Logs:
+
+```bash
+docker compose logs keycloak
+```
+
+Testar:
+
+```bash
+curl -I http://localhost:8081
+```
+
+---
+
+## Token não é gerado
+
+Verifique:
+
+- realm;
+- client_id;
+- client_secret;
+- URL;
+- client configurado para `client_credentials`.
+
+Logs:
+
+```bash
+docker compose logs keycloak
+```
+
+---
+
+## API retorna 401
+
+Verifique:
+
+```text
+Authorization: Bearer <TOKEN>
+```
+
+e confirme se o token foi emitido pelo realm correto.
+
+---
+
+## API retorna 409
+
+Pode representar uma rejeição de negócio, como:
+
+```text
+insufficient balance
+```
+
+ou:
+
+```text
+idempotency conflict
+```
+
+Verifique o corpo da resposta.
+
+---
+
+## SQS não processa
+
+Verifique:
+
+```bash
+docker compose logs -f api
+```
+
+e:
+
+```bash
+docker compose logs ministack
+```
+
+Liste filas:
+
+```bash
+aws \
+  --endpoint-url=http://localhost:4566 \
+  --region us-east-1 \
+  sqs list-queues
+```
+
+---
+
+## Outbox permanece PENDING
+
+Verifique:
+
+```bash
+docker compose logs -f api
+```
+
+e a disponibilidade do MiniStack/SQS.
+
+Consultar:
+
+```sql
+SELECT *
+FROM outbox
+ORDER BY created_at DESC;
+```
+
+---
+
+## Inbox permanece PROCESSING
+
+Verifique:
+
+```bash
+docker compose logs -f api
+```
+
+e consulte:
+
+```sql
+SELECT *
+FROM inbox
+ORDER BY created_at DESC;
+```
+
+---
+
+## Grafana não mostra dashboard
+
+Verifique:
+
+```bash
+docker compose ps grafana
+```
+
+Logs:
+
+```bash
+docker compose logs grafana
+```
+
+O diretório de dashboards deve estar disponível para o container.
+
+Se estiver utilizando Docker Desktop, confirme que o diretório do projeto está
+habilitado em File Sharing.
+
+---
+
+## Grafana sem métricas
+
+Verifique:
+
+```bash
+curl -s http://localhost:9090/api/v1/targets
+```
+
+Verifique:
+
+```bash
+docker compose logs prometheus
+```
+
+E:
+
+```bash
+docker compose logs otel-collector
+```
+
+---
+
+## Jaeger sem traces
+
+Verifique:
+
+```bash
+docker compose logs otel-collector
+```
+
+e:
+
+```bash
+docker compose logs jaeger
+```
+
+---
+
+# 63. Desenvolvimento Local sem Docker
+
+Para executar somente os testes Go:
+
+```bash
+go test ./...
+```
+
+Race detector:
+
+```bash
+go test -race ./...
+```
+
+Build:
+
+```bash
+go build ./...
+```
+
+Para executar a aplicação diretamente:
+
+```bash
+go run ./cmd/app
+```
+
+Nesse caso, as dependências externas precisam estar disponíveis e as variáveis
+de ambiente devem estar corretamente configuradas.
+
+---
+
+# 64. Variáveis de Ambiente
+
+A configuração é externalizada.
+
+Exemplos de categorias:
+
+```text
+DATABASE_URL
+DATABASE_HOST
+DATABASE_PORT
+DATABASE_USER
+DATABASE_PASSWORD
+DATABASE_NAME
+
+SQS_ENDPOINT
+SQS_QUEUE_NAME
+SQS_DLQ_NAME
+AWS_REGION
+
+KEYCLOAK_URL
+KEYCLOAK_REALM
+KEYCLOAK_CLIENT_ID
+KEYCLOAK_CLIENT_SECRET
+
+OTEL_EXPORTER_OTLP_ENDPOINT
+OTEL_SERVICE_NAME
+OTEL_ENVIRONMENT
+```
+
+Os nomes exatos devem seguir a configuração existente em `internal/config`.
+
+---
+
+# 65. Segurança
+
+Não utilizar secrets reais no código-fonte.
+
+Para ambientes reais:
+
+- utilizar Secret Manager;
+- utilizar IAM;
+- utilizar TLS;
+- restringir permissões;
+- não expor PostgreSQL publicamente;
+- não expor SQS diretamente;
+- utilizar credenciais específicas por ambiente;
+- utilizar menor privilégio.
+
+O `client_secret` utilizado no ambiente local é exclusivamente para desenvolvimento.
+
+---
+
+# 66. Local vs AWS
+
+O projeto foi estruturado para que o ambiente local possa simular a arquitetura
+de produção.
+
+Local:
+
+```text
+PostgreSQL
+MiniStack
+Keycloak
+Docker Compose
+OpenTelemetry
+Prometheus
+Grafana
+Jaeger
+```
+
+Possível produção:
+
+```text
+RDS PostgreSQL
+Amazon SQS
+OIDC Provider
+ECS / EKS
+OpenTelemetry
+Prometheus
+Grafana
+```
+
+O domínio e os casos de uso não precisam conhecer essas diferenças.
+
+---
+
+# 67. Escalabilidade
+
+A API é stateless.
+
+É possível executar múltiplas instâncias:
+
+```text
+API 1
+API 2
+API 3
+```
+
+Consumers também podem ser escalados:
+
+```text
+Consumer 1
+Consumer 2
+Consumer 3
+```
+
+A consistência é garantida por:
+
+- PostgreSQL;
+- transações;
+- locks apropriados;
+- constraints;
+- Inbox;
+- idempotência.
+
+Não existe um mutex global para controlar o saldo de todas as wallets.
+
+---
+
+# 68. Consistência Financeira
+
+A operação financeira principal deve ser transacional:
+
+```text
+BEGIN
+    │
+    ├── lock wallet
+    ├── validate balance
+    ├── update wallet
+    ├── create transaction
+    ├── append ledger
+    └── create outbox
+    │
+COMMIT
+```
+
+Em caso de erro:
+
+```text
+ROLLBACK
+```
+
+---
+
+# 69. Eventual Consistency
+
+A parte assíncrona é eventualmente consistente:
+
+```text
+Transaction
+    │
+    ▼
+Outbox
+    │
+    ▼
+SQS
+    │
+    ▼
+Consumer
+    │
+    ▼
+Inbox
+```
+
+Isso é intencional.
+
+A operação financeira principal é consistente dentro da transação do banco.
+
+O processamento assíncrono ocorre posteriormente.
+
+---
+
+# 70. Exactly Once Effect
+
+O sistema não depende de entrega exactly-once do broker.
+
+O modelo é:
+
+```text
+At-Least-Once Delivery
+          +
+Idempotent Processing
+          =
+Effectively Once Business Effect
+```
+
+Os mecanismos envolvidos são:
+
+- Idempotency;
+- Inbox;
+- database constraints;
+- transactions;
+- Outbox.
+
+---
+
+# 71. Por que usar Outbox?
+
+Sem Outbox:
+
+```text
+DB COMMIT
+   │
+   ▼
+Publish SQS
+   │
+   X
+```
+
+Existe risco de o banco confirmar a operação e o evento não ser publicado.
+
+Com Outbox:
+
+```text
+BEGIN
+
+Wallet
+Transaction
+Ledger
+Outbox
+
+COMMIT
+```
+
+Depois:
+
+```text
+Outbox
+   │
+   ▼
+SQS
+```
+
+Isso elimina a janela entre persistência da operação e persistência do evento.
+
+---
+
+# 72. Por que usar Inbox?
+
+O SQS pode entregar uma mensagem novamente.
+
+Sem Inbox:
+
+```text
+Message
+   │
+   ▼
+Debit
+   │
+   ▼
+Redelivery
+   │
+   ▼
+Debit AGAIN
+```
+
+Com Inbox:
+
+```text
+Message
+   │
+   ▼
+Inbox
+   │
+   ▼
+Debit
+   │
+   ▼
+PROCESSED
+```
+
+Na redelivery:
+
+```text
+Message
+   │
+   ▼
+Inbox
+   │
+   ▼
+Already Processed
+```
+
+O efeito financeiro não é repetido.
+
+---
+
+# 73. Por que usar Ledger?
+
+A wallet representa o estado atual.
+
+O ledger representa o histórico.
+
+```text
+Wallet
+------
+Balance = 90.00
+
+
+Ledger
+------
++100.00
+-10.00
+```
+
+Isso melhora auditoria e rastreabilidade.
+
+---
+
+# 74. Observabilidade de Negócio
+
+Além de métricas técnicas, a aplicação mede comportamento de negócio:
+
+```text
+wager_transactions_total
+```
+
+Isso permite observar:
+
+- volume;
+- processadas;
+- rejeitadas.
+
+E também:
+
+```text
+wager_processing_duration_seconds
+```
+
+para medir a duração do processamento.
+
+---
+
+# 75. Observabilidade de Mensageria
+
+O consumer expõe:
+
+```text
+sqs_messages_received_total
+sqs_messages_processed_total
+sqs_messages_deleted_total
+sqs_message_processing_duration_seconds
+```
+
+Isso permite identificar:
+
+```text
+received > processed
+```
+
+ou:
+
+```text
+processed > deleted
+```
+
+que podem indicar falhas ou redelivery.
+
+---
+
+# 76. Observabilidade da Inbox
+
+As métricas:
+
+```text
+inbox_messages_received_total
+inbox_messages_processed_total
+```
+
+ajudam a identificar comportamento do consumidor idempotente.
+
+---
+
+# 77. CI / Quality Gate
+
+A validação mínima recomendada é:
+
+```bash
+go test ./...
+go test -race ./...
+go build ./...
+```
+
+Se houver Docker disponível:
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+E executar os testes E2E.
+
+---
+
+# 78. Comandos Úteis
+
+Status:
+
+```bash
+git status
+```
+
+Histórico:
+
+```bash
+git log --oneline --decorate -10
+```
+
+Testes:
+
+```bash
+go test ./...
+```
+
+Race:
+
+```bash
+go test -race ./...
+```
+
+Build:
+
+```bash
+go build ./...
+```
+
+Format:
+
+```bash
+gofmt -w .
+```
+
+Docker:
+
+```bash
+docker compose up -d
 docker compose down
+docker compose ps
+docker compose logs -f
+```
+
+---
+
+# 79. Parar o Ambiente
+
+Parar containers:
+
+```bash
+docker compose down
+```
+
+Parar e remover volumes:
+
+```bash
+docker compose down -v
+```
+
+Atenção: `-v` remove os volumes persistentes do ambiente local, incluindo dados
+do PostgreSQL e outros serviços configurados com volumes.
+
+---
+
+# 80. Rebuild Completo
+
+Quando houver alteração no código ou Dockerfile:
+
+```bash
+docker compose down
+docker compose build --no-cache
+docker compose up -d
+```
+
+Verificar:
+
+```bash
+docker compose ps
+```
+
+---
+
+# 81. Limpeza
+
+Para remover containers:
+
+```bash
+docker compose down
+```
 
 Para remover também volumes:
 
+```bash
 docker compose down -v
+```
 
-Atenção: down -v remove dados persistidos do ambiente local, incluindo PostgreSQL, Prometheus, Jaeger, Grafana e estado do MiniStack.
+Para remover imagens não utilizadas:
 
-41. Verificação de migrations
+```bash
+docker image prune
+```
 
-As migrations são executadas automaticamente durante o startup da API.
+---
 
-No log:
+# 82. Teste Completo Recomendado
 
-database migrations completed
+Uma validação completa pode ser executada nesta ordem:
 
-deve aparecer durante a inicialização.
+## Infraestrutura
 
-42. Segurança
-
-O sistema utiliza:
-
-OIDC;
-Bearer Token;
-Keycloak;
-client credentials;
-validação de autenticação antes dos endpoints protegidos;
-validação de entrada;
-limite de leitura do body;
-rejeição de campos JSON desconhecidos;
-validação de UUID;
-validação de moeda;
-validação de Money.
-
-Segredos usados no ambiente local são apenas credenciais de desenvolvimento.
-
-Em produção, devem ser substituídos por mecanismos apropriados de secret management.
-
-43. Configuração
-
-A infraestrutura é configurável por environment variables.
-
-Principais:
-
-HTTP_PORT
-DATABASE_URL
-
-AWS_REGION
-AWS_ACCESS_KEY_ID
-AWS_SECRET_ACCESS_KEY
-AWS_ENDPOINT_URL
-
-SQS_QUEUE_URL
-SQS_EVENTS_QUEUE_URL
-SQS_DLQ_URL
-
-OIDC_ISSUER_URL
-OIDC_CLIENT_ID
-OIDC_AUDIENCE
-
-OTEL_SERVICE_NAME
-OTEL_EXPORTER_OTLP_ENDPOINT
-OTEL_EXPORTER_OTLP_PROTOCOL
-OTEL_RESOURCE_ATTRIBUTES
-
-Isso permite executar localmente com MiniStack e adaptar a configuração para ambientes AWS.
-
-44. Desenvolvimento
-
-Formatar código:
-
-gofmt -w .
-
-Executar testes:
-
-go test ./...
-
-Executar race detector:
-
-go test -race ./...
-
-Verificar compilação:
-
-go build ./...
-45. Critérios de aceitação validados
-Financeiro
-
-Money exato
-
-sem float
-
-saldo consistente
-
-insufficient balance
-
-ledger
-
-transações atômicas
-
-Concorrência
-
-wallet concorrente
-
-prevenção de double spend
-
-sem global lock
-
-race detector
-
-Idempotência
-
-persistent idempotency
-
-replay
-
-payload hash
-
-conflict detection
-
-Inbox
-
-Mensageria
-
-SQS
-
-FIFO
-
-consumer
-
-Outbox
-
-redelivery
-
-DLQ
-
-delete após sucesso
-
-Segurança
-
-Keycloak
-
-OIDC
-
-client credentials
-
-Bearer token
-
-endpoint protegido
-
-Observabilidade
-
-OpenTelemetry
-
-Collector
-
-Prometheus
-
-Grafana
-
-Jaeger
-
-métricas reais
-
-dashboard
-
-Qualidade
-
-testes unitários
-
-integração
-
-concorrência
-
-E2E
-
-race detector
-
-46. Estado atual
-
-O projeto encontra-se funcionalmente concluído.
-
-Foram validados:
-
-HTTP
-OIDC
-PostgreSQL
-Wallet
-Money
-Idempotência
-Concorrência
-Ledger
-Inbox
-Outbox
-SQS
-Consumer
-Pending Reference Worker
-OpenTelemetry
-Prometheus
-Grafana
-Jaeger
-Docker Compose
-go test
-go test -race
-E2E
-
-O dashboard do Grafana também foi validado e está carregando corretamente.
-
-47. Próximos passos
-
-O próximo passo natural é realizar apenas uma revisão final de entrega:
-
-conferir git status;
-conferir arquivos modificados;
-executar gofmt;
-executar go test ./...;
-executar go test -race ./...;
-revisar README;
-revisar ARCHITECTURE.md;
-criar commit;
-fazer push.
-
-Não é recomendado introduzir novas mudanças arquiteturais depois desta etapa sem uma nova exigência funcional.
-
-48. Comandos finais de validação
-git status
-gofmt -w .
-go test ./...
-go test -race ./...
+```bash
+docker compose up -d
 docker compose ps
-docker logs --tail=100 backend-challenge-api
-docker logs --tail=100 backend-challenge-grafana
-49. Conclusão
+```
 
-Este projeto implementa um backend distribuído para processamento de apostas com consistência financeira, idempotência persistente, processamento assíncrono, concorrência segura, mensageria, autenticação e observabilidade.
+## Health
 
-A arquitetura foi desenhada para manter o domínio independente das tecnologias de infraestrutura, permitindo evolução e substituição de adapters sem alteração das regras de negócio.
+```bash
+curl -i http://localhost:8080/health
+curl -i http://localhost:8080/health/ready
+```
 
-O ambiente local reproduz os principais componentes necessários para validação da solução:
+## OIDC
 
-Go
-+
+```bash
+curl -s \
+  -X POST \
+  "http://localhost:8081/realms/backend-challenge/protocol/openid-connect/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials" \
+  -d "client_id=backend-api-client" \
+  -d "client_secret=backend-api-secret"
+```
+
+## Testes automatizados
+
+```bash
+go test ./...
+```
+
+## Race detector
+
+```bash
+go test -race ./...
+```
+
+## Build
+
+```bash
+go build ./...
+```
+
+## Observabilidade
+
+Abrir:
+
+```text
+http://localhost:3000
+```
+
+```text
+http://localhost:9090
+```
+
+```text
+http://localhost:16686
+```
+
+---
+
+# 83. Acceptance Checklist
+
+## Backend
+
+- [x] Go
+- [x] HTTP API
+- [x] Uber Fx
+- [x] PostgreSQL
+- [x] Keycloak/OIDC
+- [x] Exact Money
+- [x] Wallet
+- [x] Wager Transaction
+- [x] Ledger
+- [x] Idempotency
+- [x] Inbox
+- [x] Outbox
+- [x] SQS
+- [x] Consumer
+- [x] DLQ
+- [x] Redelivery
+- [x] Pending Reference Worker
+
+## Concurrency
+
+- [x] Transactional wallet update
+- [x] No global lock
+- [x] Double-spend protection
+- [x] Concurrent processing tests
+- [x] Race detector
+
+## Observability
+
+- [x] OpenTelemetry
+- [x] Metrics
+- [x] Prometheus
+- [x] Grafana
+- [x] Jaeger
+- [x] HTTP metrics
+- [x] Wager metrics
+- [x] SQS metrics
+- [x] Inbox metrics
+- [x] Processing latency
+
+## Tests
+
+- [x] Unit tests
+- [x] Integration tests
+- [x] E2E
+- [x] `go test ./...`
+- [x] `go test -race ./...`
+
+## Infrastructure
+
+- [x] Docker
+- [x] Docker Compose
+- [x] MiniStack
+- [x] PostgreSQL
+- [x] Keycloak
+- [x] Grafana
+- [x] Prometheus
+- [x] Jaeger
+- [x] OTel Collector
+
+---
+
+# 84. Testes E2E Validados
+
+Os principais cenários funcionais validados incluem:
+
+### Autenticação
+
+```text
+Sem token
+    ↓
+401
+```
+
+Com token válido:
+
+```text
+Bearer Token
+    ↓
+API
+    ↓
+200
+```
+
+---
+
+### Wager
+
+```text
+Wallet = 100
+Bet = 10
+
+Result:
+Wallet = 90
+Transaction = PROCESSED
+```
+
+---
+
+### Idempotency Replay
+
+```text
+Request 1
+    ↓
+Processed
+
+Request 2
+same Idempotency-Key
+same payload
+    ↓
+Replay
+```
+
+Sem novo débito.
+
+---
+
+### Idempotency Conflict
+
+```text
+Request 1
+Key = X
+Amount = 10
+
+Request 2
+Key = X
+Amount = 20
+```
+
+Resultado:
+
+```text
+409 Conflict
+```
+
+Sem novo efeito financeiro.
+
+---
+
+### Insufficient Balance
+
+```text
+Balance < Bet
+```
+
+Resultado:
+
+```text
+REJECTED
+```
+
+Sem débito.
+
+---
+
+### Concurrent Wagers
+
+```text
+Balance = 90
+
+Bet A = 50
+Bet B = 50
+```
+
+Resultado:
+
+```text
+One processed
+One rejected
+Final balance = 40
+```
+
+---
+
+### SQS Consumer
+
+Mensagem publicada:
+
+```text
+SQS
+ ↓
+Consumer
+ ↓
+Inbox
+ ↓
+Business Processing
+ ↓
+Delete Message
+```
+
+Após processamento normal, a mensagem é removida da fila.
+
+---
+
+# 85. Considerações de Produção
+
+O ambiente deste desafio é local e voltado para avaliação/desenvolvimento.
+
+Em produção, recomenda-se adicionalmente:
+
+- TLS;
+- Secrets Manager;
+- IAM;
+- private subnets;
+- security groups;
+- backups;
+- disaster recovery;
+- autoscaling;
+- alertas;
+- DLQ alarms;
+- SQS visibility timeout adequado;
+- database connection pooling;
+- rate limiting;
+- WAF;
+- centralized logging;
+- secret rotation;
+- image scanning;
+- vulnerability scanning;
+- CI/CD com gates.
+
+---
+
+# 86. Decisões Arquiteturais
+
+| Problema | Solução |
+|---|---|
+| Precisão financeira | Money decimal exato |
+| Concorrência | PostgreSQL transaction/locking |
+| Double spend | Atomicidade + locking |
+| Retry HTTP | Idempotency |
+| Redelivery SQS | Inbox |
+| DB + evento | Outbox |
+| Mensageria | SQS |
+| Falhas permanentes | DLQ |
+| Processamento assíncrono | Consumer |
+| Dependências | Interfaces/Ports |
+| DI | Uber Fx |
+| Auth | OIDC/Keycloak |
+| Métricas | OpenTelemetry/Prometheus |
+| Dashboards | Grafana |
+| Tracing | Jaeger |
+| Ambiente local | Docker Compose |
+| AWS local | MiniStack |
+
+---
+
+# 87. Documentação de Arquitetura
+
+Para detalhes da arquitetura, decisões de design, padrões utilizados,
+fluxos transacionais, concorrência, Inbox, Outbox, observabilidade e
+estratégia de escalabilidade, consulte:
+
+```text
+ARCHITECTURE.md
+```
+
+---
+
+# 88. Conclusão
+
+O projeto foi desenvolvido com foco em um cenário realista de processamento
+financeiro distribuído.
+
+Os principais mecanismos de confiabilidade são:
+
+```text
+Exact Money
+     +
+Database Transactions
+     +
+Concurrency Control
+     +
+Idempotency
+     +
+Inbox
+     +
+Outbox
+     +
+SQS
+     +
+DLQ
+     +
+Observability
+     +
+Automated Tests
+```
+
+O resultado é uma arquitetura modular, testável e preparada para evolução.
+
+O domínio permanece desacoplado da infraestrutura, permitindo substituir
+componentes como:
+
+```text
+SQS
+  ↕
+RabbitMQ
+
 PostgreSQL
-+
-SQS/MiniStack
-+
-Keycloak
-+
-OpenTelemetry
-+
-Prometheus
-+
-Grafana
-+
-Jaeger
+  ↕
+Outro adapter de persistência
 
-O estado atual foi validado por testes automatizados, testes de concorrência, testes E2E e validação operacional dos componentes de observabilidade.
+MiniStack
+  ↕
+AWS
+```
+
+sem alterar as regras centrais do negócio.
+
+---
+
+# 89. Comando Final de Validação
+
+Antes de entregar:
+
+```bash
+gofmt -w .
+go test ./...
+go test -race ./...
+go build ./...
+docker compose build
+docker compose up -d
+docker compose ps
+```
+
+Depois validar:
+
+```text
+Health
+OIDC
+Wager
+Idempotency
+Conflict
+Insufficient Balance
+Concurrency
+Inbox
+Outbox
+SQS
+Grafana
+Prometheus
+Jaeger
+```
+
+Com isso, o backend pode ser avaliado tanto pela funcionalidade quanto pelos
+aspectos arquiteturais, de consistência, concorrência, resiliência e
+observabilidade.

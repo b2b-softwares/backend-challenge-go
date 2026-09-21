@@ -1,434 +1,612 @@
-Architecture — Distributed Wager Processing
-1. Objetivo
+# ARCHITECTURE.md
 
-Este documento descreve a arquitetura do Backend Challenge — Distributed Wager Processing.
+# Backend Challenge — Distributed Wager Processing
 
-O sistema foi projetado para processar transações financeiras de apostas com:
+## 1. Visão Geral
 
-consistência financeira;
-idempotência;
-segurança contra processamento duplicado;
-controle de concorrência;
-processamento síncrono e assíncrono;
-resiliência a falhas;
-mensageria;
-rastreabilidade;
-observabilidade;
-testabilidade;
-baixo acoplamento com infraestrutura.
+Este projeto implementa uma plataforma de processamento distribuído de apostas
+com foco em consistência financeira, idempotência, processamento assíncrono,
+concorrência segura, observabilidade e separação entre domínio e infraestrutura.
 
-A arquitetura utiliza princípios e padrões consolidados de engenharia de software:
+A arquitetura foi construída utilizando princípios de:
 
-Clean Architecture;
-Hexagonal Architecture;
-Ports and Adapters;
-Dependency Inversion;
-SOLID;
-Domain-Driven Design em escala apropriada;
-Transactional Outbox;
-Inbox Pattern;
-Event-Driven Architecture;
-Repository Pattern;
-Unit of Work / Transaction Manager;
-Dependency Injection;
-Composition Root.
-2. Princípios arquiteturais
+- Clean Architecture
+- Hexagonal Architecture
+- Ports and Adapters
+- SOLID
+- DDD Lite
+- Dependency Inversion
+- Transactional Integrity
+- Inbox Pattern
+- Outbox Pattern
+- Idempotent Consumer
+- Event-Driven Architecture
 
-Os principais princípios adotados são:
+O objetivo principal é permitir que as regras de negócio permaneçam independentes
+de HTTP, PostgreSQL, SQS, Uber Fx, OpenTelemetry ou qualquer outro mecanismo de
+infraestrutura.
 
-2.1 Dependency Inversion
+---
 
-As regras de negócio não dependem de infraestrutura.
+# 2. Objetivos Arquiteturais
+
+Os principais objetivos são:
+
+1. Garantir consistência financeira.
+2. Impedir saldo negativo.
+3. Impedir double spend.
+4. Garantir idempotência de requisições.
+5. Garantir idempotência no processamento assíncrono.
+6. Permitir redelivery de mensagens.
+7. Permitir recuperação após falhas.
+8. Garantir persistência transacional.
+9. Evitar locks globais na aplicação.
+10. Permitir processamento concorrente seguro.
+11. Separar domínio de infraestrutura.
+12. Permitir substituição de adapters.
+13. Permitir execução local e futura execução em AWS.
+14. Garantir observabilidade.
+15. Facilitar testes unitários e de integração.
+16. Permitir escala horizontal.
+
+---
+
+# 3. Visão de Alto Nível
+
+```text
+                         ┌──────────────────────┐
+                         │       Client         │
+                         └──────────┬───────────┘
+                                    │
+                                    │ HTTP
+                                    ▼
+                         ┌──────────────────────┐
+                         │      HTTP API        │
+                         │  Authentication/OIDC │
+                         └──────────┬───────────┘
+                                    │
+                                    ▼
+                         ┌──────────────────────┐
+                         │ Application Layer    │
+                         │                      │
+                         │ WagerService         │
+                         │ ReversalService      │
+                         │ Consumer              │
+                         │ Pending Worker        │
+                         └──────────┬───────────┘
+                                    │
+                         ┌──────────┴───────────┐
+                         │                      │
+                         ▼                      ▼
+                ┌─────────────────┐    ┌─────────────────┐
+                │ Domain          │    │ Ports           │
+                │                 │    │                 │
+                │ Money           │    │ Repository      │
+                │ Wallet          │    │ SQS             │
+                │ Transaction     │    │ Transaction     │
+                │ Ledger          │    │ Manager         │
+                │ Rules           │    │                 │
+                └─────────────────┘    └────────┬────────┘
+                                                 │
+                                  ┌──────────────┼──────────────┐
+                                  │              │              │
+                                  ▼              ▼              ▼
+                              PostgreSQL       SQS          Observability
+                                             /MiniStack       OTel
+```
+
+---
+
+# 4. Organização do Projeto
+
+A estrutura segue separação clara entre aplicação, domínio e infraestrutura.
+
+```text
+.
+├── cmd/
+│   └── app/
+│       └── main.go
+│
+├── internal/
+│   ├── application/
+│   │   ├── wager_service.go
+│   │   ├── wager_consumer.go
+│   │   ├── reversal_service.go
+│   │   └── pending_reference_worker.go
+│   │
+│   ├── domain/
+│   │   ├── money.go
+│   │   ├── wallet.go
+│   │   ├── transaction.go
+│   │   └── errors.go
+│   │
+│   ├── ports/
+│   │   ├── repositories.go
+│   │   ├── queue.go
+│   │   └── transaction.go
+│   │
+│   ├── adapters/
+│   │   ├── postgres/
+│   │   └── sqs/
+│   │
+│   ├── http/
+│   │   └── handler.go
+│   │
+│   ├── config/
+│   │
+│   └── observability/
+│       └── observability.go
+│
+├── migrations/
+│
+├── infra/
+│   ├── grafana/
+│   ├── prometheus/
+│   ├── otel-collector/
+│   ├── keycloak/
+│   └── ministack/
+│
+├── tests/
+│   ├── unit/
+│   ├── integration/
+│   └── e2e/
+│
+├── docker-compose.yml
+├── Dockerfile
+├── go.mod
+└── README.md
+```
+
+---
+
+# 5. Clean Architecture
+
+A aplicação segue a ideia de dependências apontando para dentro.
+
+```text
+                Infrastructure
+                     │
+                     ▼
+                Application
+                     │
+                     ▼
+                  Domain
+```
 
 O domínio não conhece:
 
-PostgreSQL;
-SQS;
-HTTP;
-Keycloak;
-OpenTelemetry;
-Grafana;
-Uber Fx.
+- PostgreSQL
+- SQS
+- HTTP
+- JSON
+- Docker
+- Uber Fx
+- OpenTelemetry
+- AWS
+- MiniStack
 
-As implementações de infraestrutura dependem das abstrações definidas pelas camadas internas.
+A camada de aplicação conhece interfaces.
 
-                 ┌─────────────────┐
-                 │     Domain      │
-                 └────────┬────────┘
-                          │
-                          ▼
-                 ┌─────────────────┐
-                 │   Application  │
-                 └────────┬────────┘
-                          │
-                          ▼
-                    Ports / Interfaces
-                          ▲
-                          │
-              ┌───────────┴───────────┐
-              │                       │
-       PostgreSQL Adapter        SQS Adapter
-3. Clean Architecture
+Os adapters implementam essas interfaces.
 
-A organização conceitual segue:
+---
 
-┌──────────────────────────────────────────────────────────────┐
-│                     INFRASTRUCTURE                           │
-│                                                              │
-│ HTTP │ PostgreSQL │ SQS │ Keycloak │ OTel │ Fx              │
-│                                                              │
-├──────────────────────────────────────────────────────────────┤
-│                         ADAPTERS                             │
-│                                                              │
-│ repositories │ consumers │ publishers │ handlers             │
-│                                                              │
-├──────────────────────────────────────────────────────────────┤
-│                       APPLICATION                            │
-│                                                              │
-│ use cases │ orchestration │ workflows                        │
-│                                                              │
-├──────────────────────────────────────────────────────────────┤
-│                          DOMAIN                              │
-│                                                              │
-│ entities │ value objects │ business rules │ errors           │
-│                                                              │
-└──────────────────────────────────────────────────────────────┘
+# 6. Hexagonal Architecture
 
-A regra fundamental é:
+A aplicação é organizada em torno de portas.
 
-Dependências apontam para dentro.
+```text
+                     ┌───────────────────┐
+                     │      Domain       │
+                     │                   │
+                     │ Business Rules    │
+                     └─────────┬─────────┘
+                               │
+                        Application
+                               │
+              ┌────────────────┼────────────────┐
+              │                │                │
+              ▼                ▼                ▼
+          HTTP Port       Repository Port    Queue Port
+              │                │                │
+              ▼                ▼                ▼
+          HTTP Adapter     PostgreSQL        SQS Adapter
+```
 
-4. Hexagonal Architecture
+Isso permite substituir uma implementação sem alterar o domínio.
 
-A aplicação é tratada como um núcleo cercado por adapters.
+Por exemplo:
 
-                     ┌───────────────┐
-                     │    HTTP       │
-                     │    Adapter    │
-                     └───────┬───────┘
-                             │
-                             ▼
-                 ┌──────────────────────┐
-                 │                      │
-                 │    APPLICATION       │
-                 │                      │
-                 │     DOMAIN           │
-                 │                      │
-                 └──────────────────────┘
-                    ▲       ▲       ▲
-                    │       │       │
-              ┌─────┘       │       └─────┐
-              │             │             │
-       PostgreSQL         SQS          OIDC
-        Adapter          Adapter       Adapter
-
-As portas representam contratos.
-
-Os adapters implementam esses contratos.
-
-5. Camadas
-5.1 Domain
-
-Responsável por:
-
-entidades;
-value objects;
-regras de negócio;
-erros de domínio;
-invariantes.
-
-Exemplo importante:
-
-Money
-
-é um conceito financeiro e não deve depender de PostgreSQL, HTTP ou SQS.
-
-5.2 Application
-
-Responsável por:
-
-casos de uso;
-orquestração;
-transações;
-coordenação entre repositories;
-processamento de mensagens;
-workflows.
-
-Componentes principais:
-
-WagerService
-ReversalService
-WagerConsumer
-PendingReferenceWorker
-OutboxPublisher
-5.3 Ports
-
-As portas definem as dependências que a aplicação precisa.
-
-Exemplos conceituais:
-
-WalletRepository
-WagerTransactionRepository
-LedgerRepository
-IdempotencyRepository
-InboxRepository
-OutboxRepository
-TransactionManager
-MessageConsumer
-MessagePublisher
-
-Essas interfaces representam contratos, não tecnologias.
-
-5.4 Adapters
-
-Adapters implementam as portas.
-
-Exemplos:
-
-PostgreSQL
+```text
 SQS
-HTTP
-Keycloak
-OpenTelemetry
-6. Composition Root
+ │
+ └── QueuePort
 
-Uber Fx é utilizado como mecanismo de composição.
+RabbitMQ
+ │
+ └── QueuePort
+```
 
-A composição ocorre no entrypoint da aplicação:
+O caso de uso continua o mesmo.
 
-cmd/app
+---
 
-O papel do Fx é:
+# 7. Dependency Inversion
 
-construir dependências;
-resolver interfaces;
-registrar lifecycle;
-iniciar workers;
-iniciar HTTP;
-iniciar observabilidade;
-executar shutdown.
+O código de negócio não depende diretamente de implementações concretas.
 
-O domínio não depende de Fx.
+Exemplo conceitual:
 
-7. Estrutura do projeto
+```go
+type WalletRepository interface {
+    GetByID(ctx context.Context, id uuid.UUID) (*domain.Wallet, error)
+    UpdateBalance(ctx context.Context, wallet *domain.Wallet) error
+}
+```
 
-Estrutura conceitual:
+O application service depende dessa interface.
 
-cmd/
-└── app/
+O PostgreSQL implementa a interface:
 
-internal/
-├── application/
-│   ├── wager_service.go
-│   ├── wager_consumer.go
-│   ├── reversal_service.go
-│   └── pending_reference_worker.go
-│
-├── domain/
-│
-├── ports/
-│
-├── adapters/
-│   ├── postgres/
-│   ├── sqs/
-│   └── oidc/
-│
-├── http/
-│
-└── observability/
+```text
+Application
+     │
+     ▼
+WalletRepository
+     ▲
+     │
+PostgresWalletRepository
+```
 
-migrations/
+Isso facilita:
 
-infra/
-├── grafana/
-├── prometheus/
-├── otel-collector/
-├── keycloak/
-└── ministack/
+- testes unitários;
+- mocks;
+- troca de banco;
+- troca de infraestrutura;
+- evolução arquitetural.
 
-tests/
-├── unit/
-└── integration/
-8. Wager Use Case
+---
 
-O caso de uso principal é o processamento de uma aposta.
+# 8. Domain Layer
 
-Fluxo:
+O domínio concentra regras financeiras.
 
-Request
-   │
-   ▼
-Validation
-   │
-   ▼
-Idempotency
-   │
-   ▼
-Wallet
-   │
-   ▼
-Transaction
-   │
-   ▼
-Ledger
-   │
-   ▼
-Outbox
-   │
-   ▼
-Commit
+Entre os principais conceitos:
 
-A operação é realizada dentro de uma transação quando necessário para manter consistência.
+- Wallet
+- Money
+- Wager Transaction
+- Ledger Entry
+- Transaction Status
+- Business Errors
 
-9. Modelo financeiro
+O domínio deve ser determinístico e independente de infraestrutura.
 
-O sistema diferencia:
+---
 
-Wallet Balance
+# 9. Money
 
-de:
+Valores financeiros não utilizam `float32` ou `float64`.
 
-Ledger
+A representação utiliza decimal exato.
 
-A wallet representa o estado atual.
+Exemplo:
 
-O ledger representa o histórico.
+```text
+R$ 10,00
+R$ 0,01
+R$ 100,50
+R$ 999999,99
+```
 
-                 WALLET
-              balance=90.00
-                   │
-                   │
-                   ▼
-                LEDGER
-        ┌────────────────────┐
-        │ BET -10.00         │
-        │ BET -50.00         │
-        │ CREDIT +100.00     │
-        └────────────────────┘
+A criação do valor financeiro ocorre a partir de representação decimal/string.
 
-Essa separação permite auditoria e rastreabilidade.
+Isso evita problemas de precisão binária.
 
-10. Money como Value Object
+Exemplo conceitual:
 
-Valores financeiros são tratados sem float.
+```go
+money, err := domain.NewMoney("10.50")
+```
+
+Operações financeiras devem permanecer determinísticas.
+
+---
+
+# 10. Regras Financeiras
+
+Uma aposta deve:
+
+1. possuir valor válido;
+2. possuir moeda válida;
+3. possuir wallet existente;
+4. possuir saldo suficiente;
+5. debitar a wallet;
+6. registrar a transação;
+7. registrar o ledger;
+8. produzir evento para processamento assíncrono quando aplicável.
+
+Saldo insuficiente não deve gerar:
+
+- saldo negativo;
+- ledger de débito;
+- side effect parcial.
+
+---
+
+# 11. Wallet e Concorrência
+
+O sistema não utiliza um mutex global para proteger wallets.
+
+Isso seria um anti-pattern para uma aplicação distribuída.
+
+Um lock global:
+
+```text
+Request A ─┐
+Request B ─┼── Global Lock
+Request C ─┘
+```
+
+criaria um gargalo.
+
+Em vez disso, a consistência é garantida no banco utilizando transações
+e mecanismos de concorrência apropriados.
 
 Conceitualmente:
 
-Money
- ├── amount
- └── currency
+```text
+Transaction
+    │
+    ▼
+SELECT wallet ... FOR UPDATE
+    │
+    ▼
+Validate balance
+    │
+    ▼
+Update wallet
+    │
+    ▼
+Insert transaction
+    │
+    ▼
+Insert ledger
+    │
+    ▼
+Commit
+```
 
-Invariantes:
+Duas operações concorrentes sobre a mesma wallet são serializadas pelo banco.
 
-valor válido;
-precisão definida;
-moeda definida;
-operações matemáticas exatas;
-ausência de floating-point arithmetic.
+---
 
-Isso é especialmente importante em operações financeiras.
-
-11. Wallet concurrency
-
-A wallet é protegida por controle transacional no banco.
-
-Não existe global mutex para proteger todas as wallets.
-
-O objetivo é permitir:
-
-Wallet A → operação concorrente
-Wallet B → operação concorrente
-Wallet C → operação concorrente
-
-sem serializar artificialmente todo o sistema.
-
-12. Prevenção de double spend
+# 12. Double Spend
 
 Considere:
 
-Saldo = R$90
+```text
+Saldo = R$ 90
 
-Request A = R$50
-Request B = R$50
+Request A = R$ 50
+Request B = R$ 50
+```
 
-As duas requisições não podem consumir o mesmo saldo.
+As duas requisições não podem resultar em:
 
-O banco é utilizado como mecanismo de sincronização da wallet.
+```text
+Saldo = -R$ 10
+```
+
+O banco controla a concorrência.
+
+Uma operação consegue realizar o débito.
+
+A outra encontra saldo insuficiente.
 
 Resultado esperado:
 
-Request A → PROCESSING → PROCESSED
+```text
+Request A → PROCESSED
 Request B → REJECTED
 
-Saldo final = R$40
+Saldo final = R$ 40
+```
 
-A consistência é garantida pela transação e pelo controle concorrente da atualização.
+Essa garantia é feita na transação de banco, e não por lock global da aplicação.
 
-13. Por que não utilizar global lock?
+---
 
-Um mutex global seria simples, mas criaria um gargalo:
+# 13. Transaction Manager
 
-Wallet A
-Wallet B
-Wallet C
-Wallet D
+O acesso transacional é abstraído.
 
-       ↓
+A aplicação não precisa conhecer diretamente o mecanismo específico do PostgreSQL.
 
-   GLOBAL LOCK
+Conceitualmente:
 
-       ↓
+```go
+type TransactionManager interface {
+    WithinTransaction(
+        ctx context.Context,
+        fn func(ctx context.Context) error,
+    ) error
+}
+```
 
-uma operação por vez
+Isso mantém a aplicação desacoplada da implementação concreta.
 
-Isso não escala.
+---
 
-O modelo utilizado permite concorrência no nível do recurso financeiro.
+# 14. Atomicidade
 
-14. Idempotência
+A operação financeira deve ser atômica.
 
-A idempotência é persistente.
+Exemplo:
 
-O sistema utiliza:
+```text
+BEGIN
 
-Idempotency-Key
-+
+Wallet update
+      +
+Transaction insert
+      +
+Ledger insert
+      +
+Outbox insert
+
+COMMIT
+```
+
+Se qualquer operação falhar:
+
+```text
+ROLLBACK
+```
+
+O sistema não deve chegar a estados como:
+
+```text
+wallet debitado
+transaction inexistente
+ledger inexistente
+event perdido
+```
+
+---
+
+# 15. Idempotência HTTP
+
+O endpoint exige:
+
+```http
+Idempotency-Key: <key>
+```
+
+A chave é persistida.
+
+A primeira requisição:
+
+```text
+Idempotency-Key = abc123
+       │
+       ▼
+Processamento
+       │
+       ▼
+Persistência
+```
+
+Uma repetição:
+
+```text
+Idempotency-Key = abc123
+       │
+       ▼
+Registro existente
+       │
+       ▼
+Replay
+```
+
+A operação não é executada novamente.
+
+---
+
+# 16. Idempotency Conflict
+
+Idempotência não significa aceitar qualquer payload com a mesma chave.
+
+Exemplo:
+
+Primeira requisição:
+
+```text
+Idempotency-Key: abc123
+Amount: 10.00
+```
+
+Segunda:
+
+```text
+Idempotency-Key: abc123
+Amount: 50.00
+```
+
+Isso deve ser considerado conflito.
+
+Resposta:
+
+```http
+409 Conflict
+```
+
+Nenhum novo efeito financeiro deve ocorrer.
+
+---
+
+# 17. Payload Hash
+
+A requisição é associada a um hash do payload.
+
+Conceitualmente:
+
+```text
+Idempotency Key
+       +
 Payload Hash
+       │
+       ▼
+Idempotency Record
+```
+
+Isso permite distinguir:
+
+```text
+mesma requisição
+```
+
+de:
+
+```text
+mesma chave + payload diferente
+```
+
+---
+
+# 18. Inbox Pattern
+
+O processamento assíncrono utiliza Inbox persistente.
 
 Fluxo:
 
-                 Request
-                    │
-                    ▼
-             Idempotency Key
-                    │
-                    ▼
-              Repository
-                    │
-          ┌─────────┴─────────┐
-          │                   │
-       inexistente          existente
-          │                   │
-          ▼                   ▼
-       processar        comparar payload
-                              │
-                       ┌──────┴──────┐
-                       │             │
-                     igual       diferente
-                       │             │
-                       ▼             ▼
-                    replay          409
+```text
+SQS Message
+     │
+     ▼
+Inbox Ensure
+     │
+     ├── Already Processed ──► Delete SQS
+     │
+     └── New Message
+              │
+              ▼
+           Claim
+              │
+              ▼
+         Processing
+```
 
-Isso impede que a mesma intenção financeira seja executada duas vezes.
+A Inbox registra que a mensagem foi recebida e seu estado de processamento.
 
-15. Inbox Pattern
+---
 
-O Inbox protege o processamento de mensagens.
+# 19. Estados da Inbox
 
-A mensagem recebida é registrada persistentemente.
+Conceitualmente:
 
-Estados conceituais:
-
+```text
 RECEIVED
    │
    ▼
@@ -436,293 +614,417 @@ PROCESSING
    │
    ▼
 PROCESSED
+```
 
-Em caso de mensagem duplicada:
+Em caso de falha:
 
-SQS
- │
- ▼
-Inbox
- │
- └── já processada
-        │
-        ▼
-     sem efeito financeiro
-        │
-        ▼
-     delete message
-16. Separação entre Inbox e Idempotency
+```text
+PROCESSING
+   │
+   ▼
+retry / redelivery
+```
 
-Embora os conceitos sejam relacionados, possuem responsabilidades diferentes.
+O processamento pode ser retomado sem duplicar o efeito financeiro.
 
-Idempotency
+---
 
-Protege a operação de negócio contra repetição de uma requisição.
+# 20. Inbox e Idempotência
 
-Inbox
+São mecanismos diferentes.
 
-Protege o consumidor contra redelivery/reprocessamento da mesma mensagem.
+### Idempotency
 
+Protege a entrada HTTP.
+
+```text
+Client
+  │
+  ▼
 HTTP
- │
- ▼
+  │
+  ▼
 Idempotency
- │
- ▼
-WagerService
+```
 
+### Inbox
 
+Protege o processamento assíncrono.
+
+```text
 SQS
  │
  ▼
 Inbox
  │
  ▼
-WagerService
+Consumer
+```
 
-Essa separação permite tratar corretamente tanto duplicidade HTTP quanto duplicidade de mensagens.
+Eles podem coexistir.
 
-17. Outbox Pattern
+---
 
-Eventos de negócio são persistidos junto com a transação principal.
+# 21. Outbox Pattern
 
-Exemplo:
+Eventos de negócio são persistidos na Outbox dentro da mesma transação
+da operação financeira.
 
-BEGIN TRANSACTION
+```text
+BEGIN
 
-UPDATE wallet
-
-INSERT wager_transaction
-
-INSERT ledger
-
-INSERT outbox_event
+Wallet
+Transaction
+Ledger
+Outbox
 
 COMMIT
+```
 
-Somente depois:
+Somente depois do commit o publisher envia o evento para SQS.
 
-Outbox Publisher
-       │
-       ▼
-      SQS
-18. Problema solucionado pelo Outbox
+---
+
+# 22. Por que Outbox?
 
 Sem Outbox:
 
+```text
 DB COMMIT
-   ↓
-publish SQS
-   ↓
-ERROR
+   │
+   ▼
+Publish SQS
+   │
+   X
+   └── falha
+```
 
-Resultado:
-
-Banco atualizado
-Mensagem perdida
+O banco teria sido atualizado, mas o evento seria perdido.
 
 Com Outbox:
 
-DB COMMIT
-   ↓
-Outbox persisted
-   ↓
-Publisher
-   ↓
-SQS
+```text
+DB Transaction
+      │
+      ├── Wallet
+      ├── Transaction
+      ├── Ledger
+      └── Outbox
+             │
+             ▼
+           COMMIT
+             │
+             ▼
+       Outbox Publisher
+             │
+             ▼
+            SQS
+```
 
-Se SQS falhar, o evento permanece persistido para retry.
+A persistência do evento faz parte da mesma transação.
 
-19. Outbox Publisher
+---
+
+# 23. Outbox Publisher
 
 O publisher busca eventos pendentes.
 
-Fluxo:
+Conceitualmente:
 
-outbox_events
-      │
-      ▼
- claim
-      │
-      ▼
- publish
-      │
- ┌────┴────┐
- │         │
-OK       ERROR
- │         │
- ▼         ▼
-published retry
-
-O evento possui informações como:
-
-event_id;
-event_type;
-aggregate_id;
-correlation_id;
-causation_id;
-occurred_at;
-version;
-payload;
-attempts;
-available_at;
-claimed_by;
-claimed_at;
-published_at;
-last_error.
-20. SQS
-
-O sistema utiliza SQS através de uma abstração.
-
-O application layer não conhece detalhes específicos da AWS.
-
-Application
-     │
-     ▼
-MessagePublisher
-MessageConsumer
-     │
-     ▼
-SQS Adapter
-     │
-     ▼
-AWS SQS / MiniStack
-
-Isso permite substituir a implementação por outro broker.
-
-21. FIFO
-
-As filas de transações utilizam FIFO.
-
-Isso é importante para preservar características de ordenação e deduplicação do mecanismo de mensageria.
-
-A consistência final, entretanto, não depende exclusivamente da FIFO.
-
-A aplicação também possui:
-
-Inbox;
-Idempotency;
-transações;
-controle de concorrência.
-22. DLQ
-
-Existe uma fila de Dead Letter Queue.
-
-Fluxo:
-
-Message
+```text
+OUTBOX
+  │
+  ├── PENDING
   │
   ▼
-Consumer
+Publish SQS
   │
-  ├── sucesso → delete
+  ▼
+MARK PUBLISHED
+```
+
+Se SQS estiver indisponível:
+
+```text
+OUTBOX
   │
-  └── erro
-        │
-        ▼
-      retry
-        │
-        ▼
-      retry
-        │
-        ▼
-       DLQ
+  ▼
+PENDING
+```
 
-A DLQ evita que mensagens permanentemente inválidas bloqueiem indefinidamente o processamento normal.
+O evento permanece persistido.
 
-23. Falhas e redelivery
+Após recuperação da infraestrutura:
 
-A regra fundamental do consumer é:
+```text
+PENDING
+   │
+   ▼
+Retry
+   │
+   ▼
+SQS
+   │
+   ▼
+PUBLISHED
+```
 
-Não deletar a mensagem antes de o processamento necessário estar confirmado.
+---
 
-Fluxo de sucesso:
+# 24. SQS
 
-Receive
-  ↓
-Inbox
-  ↓
+O projeto utiliza uma abstração de fila.
+
+A aplicação não depende diretamente de uma implementação específica.
+
+```text
+QueuePort
+   ▲
+   │
+   ├── SQS Adapter
+   │
+   └── RabbitMQ Adapter
+```
+
+No ambiente local:
+
+```text
+Application
+    │
+    ▼
+SQS Adapter
+    │
+    ▼
+MiniStack
+```
+
+Em AWS:
+
+```text
+Application
+    │
+    ▼
+SQS Adapter
+    │
+    ▼
+Amazon SQS
+```
+
+---
+
+# 25. FIFO Queue
+
+A fila utiliza características de FIFO quando necessárias.
+
+Isso ajuda a manter ordenação dentro do grupo de mensagens.
+
+O agrupamento pode utilizar uma chave relacionada ao domínio,
+como wallet ou entidade financeira.
+
+A aplicação, entretanto, não deve depender exclusivamente da ordenação da fila
+para garantir consistência.
+
+A consistência financeira continua sendo garantida pelo banco.
+
+---
+
+# 26. Consumer
+
+O consumer executa:
+
+```text
+SQS Receive
+      │
+      ▼
+Validate Message
+      │
+      ▼
+Inbox Ensure
+      │
+      ▼
+Inbox Claim
+      │
+      ▼
 Business Transaction
-  ↓
+      │
+      ├── WagerService
+      └── Inbox MarkProcessed
+      │
+      ▼
 COMMIT
-  ↓
+      │
+      ▼
+Delete SQS Message
+```
+
+A mensagem só é removida da fila após o processamento transacional.
+
+---
+
+# 27. Falha Antes do Commit
+
+Se ocorrer:
+
+```text
+SQS Receive
+      │
+      ▼
+Business Processing
+      │
+      X
+   Failure
+```
+
+A mensagem não deve ser considerada processada.
+
+Ela permanece disponível para redelivery.
+
+---
+
+# 28. Falha Depois do Commit
+
+Se:
+
+```text
+DB COMMIT
+   │
+   ▼
 Delete SQS
+   │
+   X
+Failure
+```
 
-Fluxo de falha:
+A mensagem poderá retornar.
 
-Receive
-  ↓
-Business error
-  ↓
-No delete
-  ↓
-SQS redelivery
-24. Consumer
+Nesse cenário a Inbox detecta:
 
-O WagerConsumer possui responsabilidade de:
+```text
+Already Processed
+```
 
-receber mensagem;
-validar envelope;
-validar payload;
-calcular hash;
-verificar Inbox;
-realizar claim;
-chamar caso de uso;
-marcar Inbox como processado;
-apagar mensagem somente após sucesso.
+e o consumer pode remover a mensagem sem repetir o efeito financeiro.
 
-Ele não contém as regras financeiras fundamentais.
+Esse é um dos objetivos principais do padrão Idempotent Consumer.
 
-Essas regras permanecem no application/domain layer.
+---
 
-25. Pending Reference Worker
+# 29. DLQ
 
-Existe um worker separado para processamento de referências pendentes.
-
-Essa separação evita colocar todos os workflows assíncronos dentro do consumer principal.
+Mensagens que falham repetidamente podem ser encaminhadas para uma Dead Letter Queue.
 
 Conceitualmente:
 
-Pending References
-       │
-       ▼
-PendingReferenceWorker
-       │
-       ▼
-Business processing
-26. HTTP Adapter
-
-O HTTP handler possui responsabilidade de:
-
-receber request;
-validar método;
-validar headers;
-validar JSON;
-validar campos;
-converter tipos;
-chamar application service;
-converter resultado para HTTP response.
-
-Ele não deve conter regra financeira.
-
-Exemplo:
-
-HTTP
+```text
+SQS
+ │
+ ├── retry 1
+ ├── retry 2
+ ├── retry 3
  │
  ▼
-Handler
- │
- ▼
-WagerService
-27. Autenticação
+DLQ
+```
 
-Keycloak atua como Identity Provider.
+A DLQ impede que uma mensagem permanentemente inválida bloqueie indefinidamente
+o processamento normal.
+
+---
+
+# 30. Redelivery
+
+Redelivery é tratado como comportamento esperado.
+
+A aplicação não assume:
+
+```text
+"uma mensagem será entregue apenas uma vez"
+```
+
+Em vez disso assume:
+
+```text
+at-least-once delivery
+```
+
+e garante idempotência no consumidor.
+
+---
+
+# 31. Pending Reference Worker
+
+O projeto possui worker para referências pendentes.
+
+A ideia é tratar situações onde uma entidade necessária para completar o processamento
+ainda não esteja disponível.
 
 Fluxo:
 
+```text
+Pending Reference
+       │
+       ▼
+Worker
+       │
+       ▼
+Check Reference
+       │
+       ├── Available ──► Continue
+       │
+       └── Missing ────► Retry
+```
+
+Esse mecanismo permite trabalhar com consistência eventual.
+
+---
+
+# 32. HTTP Adapter
+
+O adapter HTTP é responsável por:
+
+- parsing;
+- validação de entrada;
+- autenticação;
+- headers;
+- JSON;
+- status HTTP;
+- serialização da resposta.
+
+Ele não deve conter regras financeiras.
+
+Exemplo:
+
+```text
+HTTP Handler
+    │
+    ▼
+Request DTO
+    │
+    ▼
+Application Service
+    │
+    ▼
+Domain
+```
+
+---
+
+# 33. Authentication
+
+A API utiliza OIDC/Keycloak.
+
+O cliente utiliza:
+
+```text
+client_credentials
+```
+
+Fluxo:
+
+```text
 Client
    │
-   │ client_credentials
+   │ credentials
    ▼
 Keycloak
    │
@@ -730,862 +1032,1918 @@ Keycloak
    ▼
 Client
    │
-   │ Bearer token
+   │ Authorization: Bearer
    ▼
 API
+```
 
-A API valida o token antes de executar operações protegidas.
+A API valida o token antes de executar o caso de uso.
 
-28. OAuth2 Client Credentials
+---
 
-O fluxo utilizado é apropriado para comunicação machine-to-machine.
+# 34. Segurança
 
-Não existe login interativo de usuário no fluxo principal do desafio.
+A autenticação é separada da regra de negócio.
 
-Service A
-   │
-   │ client_id + client_secret
-   ▼
-Keycloak
-   │
-   ▼
-access_token
-   │
-   ▼
-Service B
-29. Observabilidade
+O domínio não conhece:
 
-Observabilidade é tratada como preocupação transversal.
+- JWT;
+- Keycloak;
+- OAuth;
+- OIDC;
+- Authorization header.
 
-São utilizados:
+Esses mecanismos pertencem à infraestrutura/interface.
 
-traces;
-metrics;
-logs.
+---
 
-Fluxo:
+# 35. Observabilidade
 
-Application
+A observabilidade utiliza:
+
+```text
+OpenTelemetry
+       │
+       ├── Traces
+       └── Metrics
+              │
+              ▼
+       OTel Collector
+              │
+       ┌──────┴──────┐
+       ▼             ▼
+    Jaeger       Prometheus
+                     │
+                     ▼
+                  Grafana
+```
+
+---
+
+# 36. OpenTelemetry
+
+O código utiliza OpenTelemetry para instrumentação.
+
+Os principais sinais utilizados são:
+
+- traces;
+- metrics.
+
+A configuração fica centralizada em:
+
+```text
+internal/observability/observability.go
+```
+
+Essa implementação fornece:
+
+- TracerProvider;
+- MeterProvider;
+- OTLP exporters;
+- Resource attributes;
+- service.name;
+- deployment.environment.
+
+---
+
+# 37. Tracing
+
+Traces permitem acompanhar uma requisição através das camadas.
+
+Exemplo:
+
+```text
+HTTP Request
      │
-     ├──────── traces ────────┐
-     │                        │
-     └──────── metrics ────┐  │
-                           │  │
-                           ▼  ▼
-                       OTel Collector
-                         │       │
-                         ▼       ▼
-                    Prometheus  Jaeger
-                         │
-                         ▼
-                      Grafana
-30. OpenTelemetry
+     ▼
+WagerService
+     │
+     ├── PostgreSQL
+     │
+     ├── Outbox
+     │
+     └── SQS
+```
 
-A aplicação cria:
+Em ambiente distribuído isso permite investigar:
 
-TracerProvider
-MeterProvider
+- latência;
+- falhas;
+- dependências;
+- gargalos;
+- chamadas externas.
 
-e envia dados via OTLP para:
+---
 
-otel-collector:4317
+# 38. Metrics
 
-O service name utilizado é:
+As principais métricas incluem:
 
-backend-challenge-api
-31. Métricas
-
-As métricas de negócio permitem acompanhar:
-
-Wager processing
-SQS processing
-Inbox processing
-HTTP latency
-HTTP errors
-
-Exemplos:
+```text
+http_server_request_duration_seconds
 
 wager_transactions_total
+
 wager_transactions_processed_total
+
 wager_processing_duration_seconds
 
+sqs_messages_received_total
+
+sqs_messages_processed_total
+
+sqs_messages_deleted_total
+
+sqs_message_processing_duration_seconds
+
+inbox_messages_received_total
+
+inbox_messages_processed_total
+```
+
+---
+
+# 39. HTTP Metrics
+
+As métricas HTTP permitem observar:
+
+- volume;
+- erros;
+- latência;
+- distribuição de duração.
+
+Exemplo de taxa de requisições:
+
+```promql
+sum(rate(http_server_request_duration_seconds_count[5m]))
+```
+
+Taxa de erro:
+
+```promql
+sum(
+  rate(
+    http_server_request_duration_seconds_count{
+      http_response_status_code=~"4..|5.."
+    }[5m]
+  )
+)
+/
+clamp_min(
+  sum(rate(http_server_request_duration_seconds_count[5m])),
+  1
+)
+```
+
+---
+
+# 40. Histogramas
+
+Latência não deve ser observada somente pela média.
+
+O projeto utiliza histogramas para permitir percentis.
+
+Exemplo P95:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le) (
+    rate(http_server_request_duration_seconds_bucket[5m])
+  )
+)
+```
+
+Isso permite detectar tail latency.
+
+---
+
+# 41. Wager Metrics
+
+A aplicação mede operações de apostas.
+
+Exemplo:
+
+```promql
+sum(rate(wager_transactions_total[5m]))
+```
+
+Processadas:
+
+```promql
+sum(
+  rate(
+    wager_transactions_total{
+      status="processed"
+    }[5m]
+  )
+)
+```
+
+Rejeitadas:
+
+```promql
+sum(
+  rate(
+    wager_transactions_total{
+      status="rejected"
+    }[5m]
+  )
+)
+```
+
+---
+
+# 42. Wager Processing Latency
+
+P95:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le) (
+    rate(wager_processing_duration_seconds_bucket[5m])
+  )
+)
+```
+
+P50:
+
+```promql
+histogram_quantile(
+  0.50,
+  sum by (le) (
+    rate(wager_processing_duration_seconds_bucket[5m])
+  )
+)
+```
+
+---
+
+# 43. SQS Metrics
+
+O consumer mede:
+
+```text
 sqs_messages_received_total
 sqs_messages_processed_total
 sqs_messages_deleted_total
 sqs_message_processing_duration_seconds
+```
 
+Isso permite acompanhar:
+
+```text
+Received
+   │
+   ▼
+Processed
+   │
+   ▼
+Deleted
+```
+
+Diferenças entre esses valores podem indicar:
+
+- falhas;
+- redelivery;
+- processamento lento;
+- mensagens pendentes.
+
+---
+
+# 44. Inbox Metrics
+
+A Inbox possui métricas para:
+
+```text
 inbox_messages_received_total
 inbox_messages_processed_total
-32. Histograms
+```
 
-Latências são expostas como histograms.
+Essas métricas ajudam a observar o comportamento do consumidor idempotente.
 
-Isso permite calcular percentis no Prometheus.
+---
 
-Exemplo:
+# 45. Grafana
 
-histogram_quantile(
-  0.95,
-  sum(
-    rate(
-      wager_processing_duration_seconds_bucket[5m]
-    )
-  ) by (le)
-)
+O projeto possui dashboard:
 
-Isso permite visualizar P95 sem armazenar apenas uma média.
-
-33. Grafana
-
-O dashboard foi construído sobre as métricas realmente exportadas pelo sistema.
-
-Dashboard:
-
+```text
 Backend Challenge - Distributed Wager Processing
+```
 
-Painéis:
+O dashboard possui painéis para:
 
-HTTP Latency
-Wager Transactions
-Wager Processing Latency
-Wager Business Outcomes
-SQS Consumer
-SQS Processing Latency
-Inbox / Idempotent Consumer
-34. Persistência
+1. HTTP Request Rate
+2. HTTP Error Rate
+3. HTTP Latency P95
+4. HTTP Latency P50
+5. Wager Transactions
+6. Wager Processing Latency
+7. Wager Business Outcomes
+8. SQS Consumer
+9. SQS Processing Latency
+10. Inbox / Idempotent Consumer
 
-PostgreSQL é utilizado como fonte de consistência transacional.
+---
 
-A aplicação utiliza repositories para abstrair acesso ao banco.
+# 46. Stack de Observabilidade
+
+Ambiente local:
+
+```text
+Grafana
+http://localhost:3000
+
+Prometheus
+http://localhost:9090
+
+Jaeger
+http://localhost:16686
+
+OTel Collector
+http://localhost:8889/metrics
+```
+
+API:
+
+```text
+http://localhost:8080
+```
+
+Keycloak:
+
+```text
+http://localhost:8081
+```
+
+MiniStack:
+
+```text
+http://localhost:4566
+```
+
+---
+
+# 47. Persistência
+
+PostgreSQL é utilizado como banco transacional.
+
+A persistência inclui entidades relacionadas a:
+
+- wallets;
+- wager transactions;
+- ledger;
+- idempotency;
+- inbox;
+- outbox.
+
+As alterações estruturais são realizadas por migrations.
+
+---
+
+# 48. Ledger
+
+O ledger é append-only.
+
+Isso significa que eventos financeiros não devem ser simplesmente sobrescritos.
 
 Conceitualmente:
 
-Application
-     │
-     ▼
-Repository Interface
-     │
-     ▼
-PostgreSQL Adapter
-     │
-     ▼
-PostgreSQL
-
-O domínio não conhece SQL.
-
-35. Transaction Manager
-
-Operações que exigem atomicidade utilizam uma abstração de transaction manager.
-
-Isso permite que o caso de uso controle a unidade transacional sem acoplar-se diretamente à implementação específica do banco.
-
-Conceitualmente:
-
-TransactionManager
-       │
-       ▼
-BEGIN
-       │
-       ├── WalletRepository
-       ├── TransactionRepository
-       ├── LedgerRepository
-       ├── IdempotencyRepository
-       └── OutboxRepository
-       │
-       ▼
-COMMIT
-
-Em caso de erro:
-
-ROLLBACK
-36. Atomicidade
-
-Uma operação de aposta deve manter consistência entre:
-
-Wallet
-Transaction
+```text
 Ledger
-Idempotency
-Outbox
+----------------------------
+ENTRY 1  +100.00
+ENTRY 2  -10.00
+ENTRY 3  -20.00
+ENTRY 4  +50.00
+```
 
-Quando necessário, essas alterações fazem parte da mesma unidade transacional.
+O histórico representa as movimentações.
 
-Isso evita estados parciais.
+Isso melhora:
 
-37. Correlation e causation
+- auditoria;
+- rastreabilidade;
+- reconciliação;
+- investigação de incidentes.
 
-Eventos possuem informações para rastreabilidade.
+---
 
-Conceitos:
+# 49. Transação Financeira
 
-correlation_id
-causation_id
+Uma operação típica:
 
-permitindo relacionar:
+```text
+POST /wagering/transactions
+             │
+             ▼
+        Authenticate
+             │
+             ▼
+       Validate Input
+             │
+             ▼
+       Idempotency Check
+             │
+             ▼
+       BEGIN TRANSACTION
+             │
+             ├── Wallet Lock
+             │
+             ├── Validate Balance
+             │
+             ├── Debit Wallet
+             │
+             ├── Create Transaction
+             │
+             ├── Append Ledger
+             │
+             └── Create Outbox
+             │
+             ▼
+           COMMIT
+             │
+             ▼
+          Response
+```
 
-HTTP request
-    ↓
-business transaction
-    ↓
-outbox event
-    ↓
-SQS message
-    ↓
-consumer
+---
 
-Isso é importante para diagnóstico em sistemas distribuídos.
+# 50. Rejected Wager
 
-38. Resiliência
-
-A arquitetura possui múltiplas camadas de proteção.
-
-HTTP
- │
- ├── authentication
- ├── validation
- └── idempotency
-       │
-       ▼
-Application
- │
- ├── transaction
- ├── concurrency
- └── business rules
-       │
-       ▼
-Outbox
- │
- └── retry
-       │
-       ▼
-SQS
- │
- ├── redelivery
- └── DLQ
-39. Estratégia de falha
-
-A aplicação diferencia:
-
-Erros de negócio
+Saldo insuficiente é uma rejeição de negócio.
 
 Exemplo:
 
-insufficient balance
+```text
+Balance = 10.00
+Bet     = 50.00
+```
 
 Resultado:
 
-REJECTED
+```text
+Transaction = REJECTED
+Balance     = 10.00
+Ledger      = sem débito
+```
 
-A operação pode ser registrada como resultado de negócio.
+Esse comportamento é diferente de um erro técnico.
 
-Erros técnicos
+---
 
-Exemplos:
+# 51. Business Error vs Technical Error
 
-database unavailable
-SQS unavailable
-unexpected error
-
-Esses erros não devem ser tratados como sucesso.
-
-No processamento assíncrono, a mensagem permanece disponível para retry.
-
-40. Separação entre erro de negócio e erro técnico
-
-Essa distinção é importante.
-
-Insufficient balance
-       ↓
-Business rejection
-       ↓
-Transaction REJECTED
-
-Enquanto:
-
-Database error
-       ↓
-Technical failure
-       ↓
-Rollback
-       ↓
-Retry/redelivery
-
-Isso evita transformar falhas de infraestrutura em resultados financeiros falsos.
-
-41. Testabilidade
-
-A arquitetura foi projetada para permitir testes sem depender sempre de infraestrutura real.
-
-As interfaces permitem mocks/fakes.
+### Business Error
 
 Exemplo:
 
+```text
+insufficient balance
+```
+
+Pode resultar em:
+
+```http
+409 Conflict
+```
+
+ou status equivalente definido pelo contrato.
+
+### Technical Error
+
+Exemplo:
+
+```text
+PostgreSQL unavailable
+SQS unavailable
+```
+
+Deve ser tratado como falha técnica e não como rejeição financeira normal.
+
+Essa distinção é importante para observabilidade e retry.
+
+---
+
+# 52. Error Handling
+
+Os erros devem manter semântica.
+
+Exemplo:
+
+```text
+Domain Error
+     │
+     ▼
+Application
+     │
+     ▼
+HTTP Adapter
+     │
+     ▼
+HTTP Status
+```
+
+O domínio não deve conhecer códigos HTTP.
+
+---
+
+# 53. Testabilidade
+
+A arquitetura facilita testes porque os casos de uso dependem de interfaces.
+
+Exemplo:
+
+```text
 WagerService
     │
-    ├── MockWalletRepository
-    ├── MockTransactionRepository
-    ├── MockLedgerRepository
-    ├── MockIdempotencyRepository
-    └── MockOutboxRepository
+    ├── WalletRepository
+    ├── TransactionRepository
+    ├── LedgerRepository
+    ├── IdempotencyRepository
+    ├── OutboxRepository
+    └── TransactionManager
+```
 
-Isso permite testes unitários rápidos.
+Nos testes essas interfaces podem ser substituídas por mocks/fakes.
 
-42. Testes de integração
+---
 
-Os testes de integração validam:
+# 54. Unit Tests
 
-PostgreSQL;
-transações;
-repositories;
-concorrência;
-idempotência;
-wallet.
-43. Race Detector
+Os testes unitários validam:
 
-O projeto utiliza:
+- Money;
+- regras de domínio;
+- validações;
+- idempotência;
+- insuficiência de saldo;
+- estados;
+- application services.
 
+Executar:
+
+```bash
+go test ./tests/unit/...
+```
+
+---
+
+# 55. Integration Tests
+
+Os testes de integração validam componentes reais.
+
+Exemplos:
+
+- PostgreSQL;
+- transações;
+- concorrência;
+- repositories;
+- Inbox;
+- Outbox.
+
+Executar:
+
+```bash
+go test ./tests/integration/...
+```
+
+---
+
+# 56. Race Detector
+
+O projeto deve ser validado com:
+
+```bash
 go test -race ./...
+```
 
-O objetivo é detectar condições de corrida em:
+O race detector é especialmente importante porque existem:
 
-goroutines;
-workers;
-consumers;
-processamento concorrente;
-estruturas compartilhadas.
+- consumers;
+- workers;
+- goroutines;
+- processamento concorrente;
+- acesso compartilhado;
+- operações financeiras simultâneas.
 
-O comando foi executado com sucesso no estado atual do projeto.
+---
 
-44. Testes E2E
+# 57. Concorrência
 
-A validação E2E cobre o fluxo real:
+O cenário crítico é:
 
+```text
+Wallet = 90
+
+Goroutine A → 50
+Goroutine B → 50
+```
+
+Resultado esperado:
+
+```text
+A → success
+B → rejected
+
+Final = 40
+```
+
+O teste deve validar tanto o resultado lógico quanto ausência de data races.
+
+---
+
+# 58. E2E
+
+O teste end-to-end percorre a arquitetura completa:
+
+```text
+Client
+ │
+ ▼
 Keycloak
-   ↓
-HTTP
-   ↓
-API
-   ↓
+ │
+ ▼
+HTTP API
+ │
+ ▼
+Application
+ │
+ ▼
 PostgreSQL
-   ↓
+ │
+ ▼
 Outbox
-   ↓
+ │
+ ▼
 SQS
-   ↓
+ │
+ ▼
 Consumer
-   ↓
+ │
+ ▼
 Inbox
-
-Também foram validados:
-
-replay idempotente;
-conflito de idempotência;
-saldo insuficiente;
-concorrência;
-processamento SQS;
-métricas;
-Grafana.
-45. Estratégia de deploy
-
-A aplicação foi desenhada para funcionar localmente com:
-
-Docker Compose
-+
-MiniStack
-
-e permitir adaptação para AWS real através de configuração.
-
-O objetivo é evitar dependência estrutural do ambiente local.
-
-46. Local versus AWS
-
-Local:
-
-MiniStack
+ │
+ ▼
+Application
+ │
+ ▼
 PostgreSQL
-Docker Compose
+```
+
+Isso valida integração entre os principais componentes.
+
+---
+
+# 59. LocalStack / MiniStack
+
+Para desenvolvimento local, o projeto utiliza MiniStack para simular serviços AWS.
+
+O objetivo é permitir:
+
+```text
+Local Development
+       │
+       ▼
+MiniStack
+       │
+       ▼
+SQS-compatible API
+```
+
+Sem necessidade de depender de uma conta AWS para testes locais.
+
+---
+
+# 60. Local vs AWS
+
+A arquitetura permite:
+
+```text
+LOCAL
+
+PostgreSQL
+MiniStack
 Keycloak
-OTel
-Prometheus
 Grafana
+Prometheus
 Jaeger
+OTel Collector
+```
 
-AWS:
+e posteriormente:
 
-AWS SQS
-AWS IAM
-AWS RDS / PostgreSQL
-AWS ECS
-AWS CloudWatch / observability stack
-
-A camada de aplicação não deve precisar conhecer essas diferenças.
-
-47. Configuração por ambiente
-
-As URLs, credenciais e endpoints são configuráveis através de environment variables.
-
-Isso permite:
-
-Local
-   ↓
-MiniStack
-
-Staging
-   ↓
+```text
 AWS
 
-Production
-   ↓
-AWS
-
-sem alterar o domínio.
-
-48. Segurança arquitetural
-
-A API utiliza autenticação antes do processamento.
-
-Além disso:
-
-inputs são validados;
-JSON desconhecido é rejeitado;
-body possui limite;
-UUIDs são validados;
-moeda é normalizada/validada;
-valores monetários não utilizam float.
-
-As credenciais locais são exclusivamente para ambiente de desenvolvimento.
-
-49. Performance
-
-Algumas decisões favorecem escalabilidade:
-
-Concorrência por wallet
-
-Não existe lock global.
-
-Workers
-
-Processamento assíncrono pode escalar horizontalmente.
-
+RDS / PostgreSQL
 SQS
+Keycloak ou IdP corporativo
+CloudWatch / Grafana
+OpenTelemetry
+ECS / EKS
+```
 
-Desacopla produtores e consumidores.
+O domínio não precisa ser alterado para essa migração.
 
-Outbox
+---
 
-Desacopla transação financeira da publicação externa.
+# 61. Configuration Driven Architecture
 
-PostgreSQL
+Configurações devem ser externas ao código.
 
-Mantém consistência onde ela é necessária.
+Exemplos:
 
-50. Escalabilidade horizontal
+```text
+DATABASE_URL
+SQS_ENDPOINT
+SQS_QUEUE_NAME
+SQS_DLQ_NAME
+KEYCLOAK_URL
+OTEL_EXPORTER_OTLP_ENDPOINT
+SERVICE_NAME
+ENVIRONMENT
+```
 
-A arquitetura permite múltiplas instâncias da API.
+Isso permite mudar o ambiente sem alterar regras de negócio.
 
+---
+
+# 62. Uber Fx
+
+Uber Fx é utilizado como composition root.
+
+O `main.go` é responsável por montar a aplicação.
+
+Conceitualmente:
+
+```text
+main.go
+   │
+   ├── Config
+   ├── Observability
+   ├── Database
+   ├── Repositories
+   ├── Services
+   ├── HTTP
+   ├── SQS
+   └── Workers
+```
+
+O Fx resolve as dependências.
+
+A lógica de negócio não deve depender diretamente do Fx.
+
+---
+
+# 63. Composition Root
+
+O composition root conhece as implementações concretas.
+
+```text
+cmd/app/main.go
+       │
+       ├── PostgreSQL Adapter
+       ├── SQS Adapter
+       ├── HTTP Server
+       ├── Observability
+       └── Application Services
+```
+
+Essa é uma decisão importante para evitar acoplamento do domínio ao framework.
+
+---
+
+# 64. Lifecycle
+
+Workers e servidores são registrados no lifecycle da aplicação.
+
+Conceitualmente:
+
+```text
+Application Start
+       │
+       ├── HTTP
+       ├── Outbox Publisher
+       ├── Wager Consumer
+       └── Pending Worker
+       │
+       ▼
+Application Running
+       │
+       ▼
+Application Shutdown
+       │
+       ├── Stop HTTP
+       ├── Stop Consumer
+       ├── Stop Workers
+       └── Flush Observability
+```
+
+---
+
+# 65. Graceful Shutdown
+
+A aplicação deve encerrar de forma controlada.
+
+Objetivos:
+
+- não interromper transações em andamento de forma abrupta;
+- interromper workers;
+- finalizar operações em andamento;
+- liberar conexões;
+- flush de telemetry;
+- fechar recursos.
+
+---
+
+# 66. Scalability
+
+A aplicação foi desenhada para escala horizontal.
+
+Exemplo:
+
+```text
              Load Balancer
-                   │
-       ┌───────────┼───────────┐
-       ▼           ▼           ▼
-     API-1       API-2       API-3
-       │           │           │
-       └───────────┼───────────┘
-                   ▼
+                  │
+        ┌─────────┼─────────┐
+        ▼         ▼         ▼
+      API-1     API-2     API-3
+        │         │         │
+        └─────────┼─────────┘
+                  ▼
               PostgreSQL
+```
 
-Para processamento assíncrono:
+Consumers:
 
+```text
              SQS
               │
        ┌──────┼──────┐
        ▼      ▼      ▼
-     Worker Worker Worker
+   Consumer1 Consumer2 Consumer3
+```
 
-A idempotência persistente e o controle transacional são fundamentais para esse modelo.
+A consistência é garantida pela persistência e idempotência.
 
-51. Consistência versus disponibilidade
+---
 
-Operações financeiras priorizam consistência.
+# 67. Stateless API
 
-Para uma aposta:
+A API não deve depender de estado local em memória para garantir consistência.
 
-consistência financeira
-        >
-processamento parcial
+Isso permite:
 
-É preferível rejeitar/reprocessar uma operação do que permitir:
+```text
+API instance A
+API instance B
+API instance C
+```
 
-saldo incorreto
+processarem requisições simultaneamente.
 
-ou:
+Estado crítico permanece em PostgreSQL.
 
-double spend
-52. Eventual consistency
+---
 
-Nem todo componente precisa ser síncrono.
+# 68. No Global Lock
 
-O fluxo financeiro principal mantém consistência transacional.
+Não é utilizado:
 
-Eventos derivados podem ser publicados de forma assíncrona:
+```go
+var globalMutex sync.Mutex
+```
 
+para proteger todas as wallets.
+
+Isso impediria escala horizontal e criaria gargalo.
+
+A coordenação financeira ocorre no banco.
+
+---
+
+# 69. Eventual Consistency
+
+O processamento assíncrono naturalmente possui etapas:
+
+```text
 Transaction
-    ↓
-COMMIT
-    ↓
+   │
+   ▼
 Outbox
-    ↓
+   │
+   ▼
 SQS
-
-Isso permite desacoplar consumidores secundários do request original.
-
-53. Decisões arquiteturais importantes
-PostgreSQL para consistência financeira
-
-Escolhido por:
-
-transações;
-locking;
-constraints;
-durabilidade;
-suporte a operações concorrentes.
-SQS para processamento assíncrono
-
-Escolhido por:
-
-desacoplamento;
-retry;
-DLQ;
-escalabilidade;
-modelo assíncrono.
+   │
+   ▼
+Consumer
+   │
+   ▼
 Inbox
+```
 
-Escolhido para garantir processamento idempotente de mensagens.
+Essas etapas podem não acontecer no mesmo instante.
 
-Outbox
+O sistema assume consistência eventual onde apropriado.
 
-Escolhido para evitar inconsistência entre banco e broker.
+A operação financeira principal, entretanto, permanece transacional.
 
-Keycloak
+---
 
-Escolhido para separar autenticação da aplicação.
+# 70. Observabilidade como Parte da Arquitetura
 
-OpenTelemetry
+Observabilidade não é apenas monitoramento externo.
 
-Escolhido para observabilidade vendor-neutral.
+Ela é integrada ao fluxo de aplicação.
 
-54. Anti-patterns evitados
+Exemplo:
+
+```text
+Request
+  │
+  ├── Trace
+  ├── Metrics
+  │
+  ▼
+WagerService
+  │
+  ├── Metrics
+  ├── Trace
+  │
+  ▼
+Database / SQS
+```
+
+Isso permite correlacionar comportamento de negócio e infraestrutura.
+
+---
+
+# 71. Diagnóstico de Incidentes
+
+Uma investigação típica pode seguir:
+
+```text
+Grafana
+   │
+   ▼
+Latency / Error Rate
+   │
+   ▼
+Trace ID
+   │
+   ▼
+Jaeger
+   │
+   ▼
+Application Span
+   │
+   ▼
+Database / SQS
+```
+
+Isso reduz o tempo necessário para identificar gargalos.
+
+---
+
+# 72. Failure Scenarios
+
+### PostgreSQL indisponível
+
+Resultado:
+
+```text
+Transaction fails
+```
+
+Nenhum débito parcial deve permanecer.
+
+---
+
+### SQS indisponível
+
+A Outbox permanece:
+
+```text
+PENDING
+```
+
+e pode ser publicada posteriormente.
+
+---
+
+### Consumer falha
+
+A mensagem pode ser redeliverada.
+
+A Inbox impede duplicação do efeito.
+
+---
+
+### Delete SQS falha
+
+A mensagem pode retornar.
+
+A Inbox detecta:
+
+```text
+PROCESSED
+```
+
+e evita novo processamento financeiro.
+
+---
+
+### API reinicia
+
+O estado permanece no PostgreSQL.
+
+A aplicação pode voltar a processar.
+
+---
+
+# 73. Anti-Patterns Evitados
 
 A arquitetura evita:
 
-Global lock
-mutex global
+### Regra de negócio no Handler
 
-porque limita concorrência.
+```text
+HTTP Handler
+ ├── SQL
+ ├── wallet calculation
+ ├── ledger
+ └── business rules
+```
 
-Float para dinheiro
+Não recomendado.
 
-Porque pode gerar erros de precisão.
+---
 
-Publish-before-commit
+### Domínio dependendo de PostgreSQL
 
-Porque pode publicar eventos de operações que posteriormente sofreriam rollback.
+Não recomendado.
 
-Delete-before-commit
+---
 
-Porque pode perder mensagens.
+### Domínio dependendo de SQS
 
-Idempotência apenas em memória
+Não recomendado.
 
-Porque reinício destruiria o estado.
+---
 
-Regra de negócio no HTTP handler
+### Float para dinheiro
 
-Porque acoplaria domínio ao transporte.
+Não permitido.
 
-Regra de negócio no SQS consumer
+---
 
-Porque acoplaria negócio à infraestrutura de mensageria.
+### Global Mutex
 
-Dependência direta de AWS no domínio
+Não utilizado para consistência financeira.
 
-Porque dificultaria testes e substituição de infraestrutura.
+---
 
-55. Lifecycle da aplicação
+### Estado financeiro somente em memória
 
-O startup é controlado pelo Fx.
+Não permitido.
 
-Fluxo conceitual:
+---
 
-Application start
-      │
-      ▼
-Configuration
-      │
-      ▼
-Database
-      │
-      ▼
-Migrations
-      │
-      ▼
+### Publicar SQS antes do commit
+
+Evita-se devido ao Outbox.
+
+---
+
+### Deletar SQS antes do commit
+
+Evita-se porque poderia perder mensagem.
+
+---
+
+### Consumidor sem Inbox
+
+Evita-se porque redelivery poderia gerar efeitos duplicados.
+
+---
+
+# 74. Princípios SOLID
+
+## Single Responsibility
+
+Cada componente possui uma responsabilidade clara.
+
+Exemplos:
+
+```text
+HTTP Handler
+    → HTTP
+
+WagerService
+    → Use case
+
+Repository
+    → Persistence
+
+SQS Adapter
+    → Messaging
+
 Observability
+    → Telemetry
+```
+
+---
+
+## Open/Closed
+
+Adapters podem ser adicionados sem alterar o domínio.
+
+Exemplo:
+
+```text
+SQS
+RabbitMQ
+Kafka
+```
+
+podem implementar a mesma porta.
+
+---
+
+## Liskov Substitution
+
+Uma implementação de uma porta deve respeitar o contrato definido pela interface.
+
+---
+
+## Interface Segregation
+
+Interfaces são pequenas e específicas.
+
+---
+
+## Dependency Inversion
+
+Application e domínio dependem de abstrações.
+
+---
+
+# 75. DDD Lite
+
+O projeto não tenta implementar DDD completo.
+
+Utiliza conceitos que agregam valor ao problema:
+
+- entidades;
+- value objects;
+- regras de domínio;
+- serviços de aplicação;
+- repositories;
+- eventos;
+- estados.
+
+O objetivo é manter o domínio expressivo sem adicionar complexidade desnecessária.
+
+---
+
+# 76. Aggregate Wallet
+
+A wallet pode ser tratada como unidade de consistência financeira.
+
+Operações relacionadas ao saldo precisam respeitar a consistência desse agregado.
+
+A persistência e concorrência são coordenadas pelo banco.
+
+---
+
+# 77. Transaction Lifecycle
+
+Uma transação pode passar por estados como:
+
+```text
+RECEIVED
+    │
+    ▼
+PROCESSING
+    │
+    ├── success ──► PROCESSED
+    │
+    └── business failure ──► REJECTED
+```
+
+Estados devem ser persistidos para auditoria e idempotência.
+
+---
+
+# 78. Auditability
+
+A combinação:
+
+```text
+Transaction
++
+Ledger
++
+Inbox
++
+Outbox
+```
+
+permite reconstruir a trajetória de uma operação.
+
+Isso é importante para sistemas financeiros.
+
+---
+
+# 79. Data Consistency
+
+Existem dois tipos principais de consistência:
+
+### Strong Consistency
+
+Utilizada na operação financeira principal.
+
+Exemplo:
+
+```text
+wallet + transaction + ledger
+```
+
+### Eventual Consistency
+
+Utilizada em processamento assíncrono.
+
+Exemplo:
+
+```text
+outbox → SQS → consumer
+```
+
+Essa distinção é intencional.
+
+---
+
+# 80. Performance
+
+A arquitetura evita gargalos artificiais.
+
+Exemplos:
+
+- API stateless;
+- processamento concorrente;
+- ausência de global lock;
+- SQS para desacoplamento;
+- workers independentes;
+- banco como coordenador de concorrência;
+- observabilidade baseada em métricas.
+
+---
+
+# 81. Resilience
+
+A arquitetura suporta:
+
+- retries;
+- redelivery;
+- idempotência;
+- Inbox;
+- Outbox;
+- DLQ;
+- transações;
+- graceful shutdown.
+
+Isso permite recuperar-se de falhas transitórias.
+
+---
+
+# 82. Test Pyramid
+
+A estratégia de testes segue:
+
+```text
+              E2E
+             /   \
+        Integration
+          /       \
+         Unit Tests
+```
+
+A maior quantidade de testes deve estar próxima do domínio e application layer.
+
+Testes de infraestrutura validam integração real.
+
+E2E valida o fluxo completo.
+
+---
+
+# 83. Regression
+
+Antes de considerar uma alteração concluída:
+
+```bash
+go test ./...
+```
+
+e:
+
+```bash
+go test -race ./...
+```
+
+devem passar.
+
+Quando Docker estiver disponível, também devem ser validados:
+
+```bash
+docker compose up -d
+```
+
+seguido pelos testes de integração/E2E aplicáveis.
+
+---
+
+# 84. Quality Gates
+
+Os principais gates são:
+
+```text
+Compilation
+    │
+    ▼
+Unit Tests
+    │
+    ▼
+Integration Tests
+    │
+    ▼
+Race Detector
+    │
+    ▼
+E2E
+    │
+    ▼
+Observability
+    │
+    ▼
+Documentation
+```
+
+---
+
+# 85. Production Considerations
+
+Para produção, recomenda-se:
+
+- secrets manager;
+- TLS;
+- IAM;
+- database credentials fora do código;
+- network segmentation;
+- least privilege;
+- autoscaling;
+- SQS visibility timeout adequado;
+- DLQ monitoring;
+- database backups;
+- migrations controladas;
+- alertas;
+- dashboards;
+- distributed tracing.
+
+---
+
+# 86. AWS Mapping
+
+Uma possível evolução:
+
+```text
+Local                    AWS
+
+PostgreSQL      →       RDS PostgreSQL
+MiniStack       →       Amazon SQS
+Keycloak        →       OIDC Provider
+Docker Compose  →       ECS / EKS
+OTel Collector  →       AWS / Managed Backend
+Prometheus      →       Managed Prometheus
+Grafana         →       Grafana
+Jaeger          →       Trace backend
+```
+
+A arquitetura permite essa evolução sem alterar o domínio.
+
+---
+
+# 87. Deployment Model
+
+Uma implantação pode ser:
+
+```text
+                    Internet
+                       │
+                       ▼
+                Load Balancer
+                       │
+              ┌────────┴────────┐
+              ▼                 ▼
+            API 1             API 2
+              │                 │
+              └────────┬────────┘
+                       ▼
+                   PostgreSQL
+
+                       │
+                       ▼
+                      SQS
+                       │
+                ┌──────┴──────┐
+                ▼             ▼
+            Consumer 1    Consumer 2
+```
+
+---
+
+# 88. Security Boundaries
+
+As fronteiras principais são:
+
+```text
+External Client
       │
       ▼
-HTTP
+Authentication
       │
-      ├── Wager Consumer
+      ▼
+HTTP Adapter
       │
-      ├── Outbox Publisher
-      │
-      └── Pending Reference Worker
-
-Shutdown:
-
-SIGTERM
-   ↓
-stop accepting new work
-   ↓
-stop workers
-   ↓
-flush telemetry
-   ↓
-close resources
-   ↓
-exit
-56. Observabilidade como arquitetura transversal
-
-Observabilidade não é responsabilidade exclusiva de um componente.
-
-Ela atravessa:
-
-HTTP
+      ▼
 Application
+      │
+      ▼
+Persistence / Messaging
+```
+
+Cada camada possui responsabilidades distintas.
+
+---
+
+# 89. Repository Pattern
+
+Repositories escondem detalhes de persistência.
+
+Exemplo conceitual:
+
+```go
+type LedgerRepository interface {
+    Append(ctx context.Context, entry *domain.LedgerEntry) error
+}
+```
+
+O application service não precisa saber:
+
+```sql
+INSERT INTO ledger ...
+```
+
+Esse detalhe pertence ao adapter.
+
+---
+
+# 90. Messaging Port
+
+A mesma filosofia é utilizada para filas.
+
+Exemplo conceitual:
+
+```go
+type MessageQueue interface {
+    Publish(ctx context.Context, message Message) error
+    Receive(ctx context.Context) ([]Message, error)
+    Delete(ctx context.Context, message Message) error
+}
+```
+
+A implementação concreta pode ser SQS.
+
+---
+
+# 91. Evolução para RabbitMQ
+
+Se futuramente a infraestrutura utilizar RabbitMQ:
+
+```text
+Antes:
+
+Application
+    │
+    ▼
+QueuePort
+    │
+    ▼
+SQS Adapter
+
+
+Depois:
+
+Application
+    │
+    ▼
+QueuePort
+    │
+    ▼
+RabbitMQ Adapter
+```
+
+A aplicação não precisa ser reescrita.
+
+---
+
+# 92. Evolução para Kafka
+
+O mesmo conceito pode ser utilizado para Kafka quando o modelo de entrega
+e processamento justificar essa tecnologia.
+
+O importante é preservar:
+
+- contrato;
+- idempotência;
+- consistência;
+- observabilidade.
+
+---
+
+# 93. Transactional Boundaries
+
+Cada caso de uso define sua própria fronteira transacional.
+
+Isso evita transações gigantes que envolvam:
+
+```text
+HTTP
++
+SQS
++
 Database
-Messaging
-Workers
++
+External API
+```
 
-Isso permite acompanhar o ciclo completo da operação.
+A transação de banco deve ser curta e determinística.
 
-57. Diagnóstico operacional
+---
 
-Para investigar uma operação:
+# 94. Não Existe Transação Distribuída
 
-1. Correlation ID
-       ↓
-2. HTTP trace
-       ↓
-3. Wager processing
-       ↓
-4. Database transaction
-       ↓
-5. Outbox
-       ↓
-6. SQS
-       ↓
-7. Consumer
-       ↓
-8. Inbox
+A arquitetura não depende de 2PC entre:
 
-As métricas mostram comportamento agregado.
+```text
+PostgreSQL
++
+SQS
+```
 
-Os traces ajudam a investigar uma execução específica.
+Em vez disso utiliza:
 
-Os logs fornecem detalhes operacionais.
+```text
+PostgreSQL Transaction
++
+Outbox
++
+Asynchronous Publishing
+```
 
-58. Modelo de observabilidade
+Esse modelo reduz acoplamento e melhora resiliência.
+
+---
+
+# 95. Exactly Once vs At Least Once
+
+SQS normalmente deve ser tratado como mecanismo de entrega que pode resultar
+em redelivery.
+
+Portanto:
+
+```text
+Delivery = at least once
+```
+
+A aplicação busca:
+
+```text
+Effect = effectively once
+```
+
+por meio de:
+
+- Inbox;
+- Idempotency;
+- database constraints;
+- transactions.
+
+---
+
+# 96. Idempotent Consumer
+
+O consumidor não confia na fila para evitar duplicação.
+
+Ele utiliza persistência:
+
+```text
+Message ID / Payload Hash
+            │
+            ▼
+          Inbox
+            │
+            ▼
+       Business Effect
+```
+
+Assim uma mesma mensagem pode ser recebida novamente sem duplicar o efeito.
+
+---
+
+# 97. Database as Consistency Coordinator
+
+Em operações financeiras concorrentes, PostgreSQL atua como coordenador da
+consistência.
+
+Isso é preferível a manter estado crítico em memória da aplicação.
+
+---
+
+# 98. Horizontal Scaling
+
+Com múltiplas instâncias:
+
+```text
+API 1
+API 2
+API 3
+```
+
+todas compartilham o mesmo banco.
+
+Consumers podem ser escalados:
+
+```text
+Consumer 1
+Consumer 2
+Consumer 3
+Consumer 4
+```
+
+A Inbox e as transações impedem efeitos duplicados.
+
+---
+
+# 99. Operational Visibility
+
+A equipe pode acompanhar:
+
+```text
+HTTP
+ │
+ ├── throughput
+ ├── errors
+ └── latency
+
+Wager
+ │
+ ├── processed
+ ├── rejected
+ └── latency
+
+SQS
+ │
+ ├── received
+ ├── processed
+ └── deleted
+
+Inbox
+ │
+ ├── received
+ └── processed
+```
+
+Isso fornece visão operacional do sistema.
+
+---
+
+# 100. Architectural Decision Summary
+
+Principais decisões:
+
+| Decisão | Motivo |
+|---|---|
+| Clean Architecture | Separação de responsabilidades |
+| Hexagonal Architecture | Desacoplamento de infraestrutura |
+| Interfaces | Testabilidade e substituição de adapters |
+| Exact Money | Precisão financeira |
+| PostgreSQL | Consistência transacional |
+| Database locking | Concorrência financeira |
+| Idempotency | Proteção contra retries HTTP |
+| Inbox | Idempotência assíncrona |
+| Outbox | Atomicidade entre DB e eventos |
+| SQS | Processamento assíncrono |
+| DLQ | Isolamento de mensagens problemáticas |
+| OpenTelemetry | Observabilidade |
+| Prometheus | Métricas |
+| Grafana | Dashboards |
+| Jaeger | Distributed tracing |
+| Uber Fx | Dependency Injection |
+| Keycloak/OIDC | Authentication |
+| Docker Compose | Ambiente local reproduzível |
+
+---
+
+# 101. Fluxo Completo
+
+O fluxo completo pode ser representado como:
+
+```text
+                    CLIENT
+                       │
+                       ▼
+                ┌─────────────┐
+                │  Keycloak   │
+                └──────┬──────┘
+                       │ token
+                       ▼
+                ┌─────────────┐
+                │ HTTP API    │
+                └──────┬──────┘
+                       │
+                       ▼
+                ┌─────────────┐
+                │ Idempotency │
+                └──────┬──────┘
+                       │
+                       ▼
                 ┌─────────────┐
                 │ Application │
                 └──────┬──────┘
                        │
-          ┌────────────┼────────────┐
-          │            │            │
-          ▼            ▼            ▼
-       Metrics       Traces        Logs
-          │            │            │
-          ▼            ▼            ▼
-    Prometheus       Jaeger      Container Logs
-          │
-          ▼
-       Grafana
-59. Critérios de qualidade
+                       ▼
+                ┌─────────────┐
+                │ PostgreSQL  │
+                │             │
+                │ Wallet      │
+                │ Transaction │
+                │ Ledger      │
+                │ Outbox      │
+                └──────┬──────┘
+                       │ commit
+                       ▼
+                ┌─────────────┐
+                │Outbox Worker│
+                └──────┬──────┘
+                       │
+                       ▼
+                ┌─────────────┐
+                │     SQS     │
+                └──────┬──────┘
+                       │
+                       ▼
+                ┌─────────────┐
+                │  Consumer   │
+                └──────┬──────┘
+                       │
+                       ▼
+                ┌─────────────┐
+                │    Inbox    │
+                └──────┬──────┘
+                       │
+                       ▼
+                ┌─────────────┐
+                │ Application │
+                └──────┬──────┘
+                       │
+                       ▼
+                ┌─────────────┐
+                │ PostgreSQL  │
+                └─────────────┘
 
-A implementação foi validada em diferentes dimensões:
 
-Correctness
-    ↓
-Transactions
-    ↓
-Concurrency
-    ↓
+Observability:
+
+        Application
+             │
+             ▼
+       OpenTelemetry
+             │
+             ▼
+       OTel Collector
+         │          │
+         ▼          ▼
+    Prometheus     Jaeger
+         │
+         ▼
+      Grafana
+```
+
+---
+
+# 102. Architectural Validation
+
+A arquitetura atende aos principais requisitos do desafio:
+
+- processamento distribuído;
+- processamento assíncrono;
+- exact money;
+- persistência;
+- concorrência;
+- idempotência;
+- Inbox;
+- Outbox;
+- SQS;
+- DLQ;
+- retries;
+- redelivery;
+- OIDC;
+- observabilidade;
+- testes;
+- Docker;
+- modularidade;
+- separação de responsabilidades.
+
+---
+
+# 103. Estado Esperado do Sistema
+
+Em operação normal:
+
+```text
+HTTP
+    │
+    ▼
+Authenticated
+    │
+    ▼
+Validated
+    │
+    ▼
+Idempotent
+    │
+    ▼
+Transactional
+    │
+    ▼
+Ledgered
+    │
+    ▼
+Outboxed
+    │
+    ▼
+Published
+    │
+    ▼
+Consumed
+    │
+    ▼
+Inbox Protected
+```
+
+---
+
+# 104. Conclusão
+
+A arquitetura foi projetada para tratar o processamento de apostas como um
+problema de consistência financeira distribuída, e não apenas como uma API HTTP.
+
+Os principais pilares são:
+
+```text
+Domain Rules
+      +
+Transactional Consistency
+      +
 Idempotency
-    ↓
-Messaging
-    ↓
-Security
-    ↓
-Observability
-    ↓
-Testing
-60. Estado atual
-
-O projeto encontra-se funcionalmente concluído.
-
-Foram validados:
-
-✓ Go 1.25
-✓ Uber Fx
-✓ HTTP
-✓ Keycloak / OIDC
-✓ PostgreSQL
-✓ Money
-✓ Wallet
-✓ Concurrency
-✓ Double-spend protection
-✓ Idempotency
-✓ Inbox
-✓ Ledger
-✓ Outbox
-✓ SQS
-✓ FIFO
-✓ Consumer
-✓ DLQ
-✓ Redelivery
-✓ Pending Reference Worker
-✓ OpenTelemetry
-✓ Prometheus
-✓ Grafana
-✓ Jaeger
-✓ Docker Compose
-✓ Unit tests
-✓ Integration tests
-✓ E2E tests
-✓ Race detector
-61. Validação arquitetural final
-
-O sistema atende aos principais princípios definidos para o desafio:
-
-Domain independent from infrastructure
-                ✓
-
-Application independent from HTTP
-                ✓
-
-Application independent from SQS
-                ✓
-
-Persistence behind interfaces
-                ✓
-
-Messaging behind interfaces
-                ✓
-
-Idempotent financial processing
-                ✓
-
-Transactional consistency
-                ✓
-
-Concurrency-safe wallet
-                ✓
-
-Observable distributed processing
-                ✓
-
-Testable application layer
-                ✓
-62. Resumo arquitetural
-
-A solução pode ser resumida como:
-
-                         CLIENT
-                           │
-                           ▼
-                    ┌──────────────┐
-                    │    HTTP      │
-                    │   Adapter    │
-                    └──────┬───────┘
-                           │
-                           ▼
-                  ┌──────────────────┐
-                  │  APPLICATION     │
-                  │                  │
-                  │ WagerService     │
-                  │ ReversalService  │
-                  │ WagerConsumer    │
-                  │ Workers          │
-                  └────────┬─────────┘
-                           │
-                    ┌──────┴──────┐
-                    │    PORTS     │
-                    └──────┬───────┘
-                           │
-             ┌─────────────┼─────────────┐
-             │             │             │
-             ▼             ▼             ▼
-        PostgreSQL        SQS         Keycloak
-             │             │
-             │             │
-             └──────┬──────┘
-                    │
-                    ▼
-             EVENT PROCESSING
-                    │
-             ┌──────┴──────┐
-             ▼             ▼
-          Inbox          Outbox
-             │             │
-             └──────┬──────┘
-                    │
-                    ▼
-              OBSERVABILITY
-                    │
-          ┌─────────┼─────────┐
-          ▼         ▼         ▼
-      Prometheus  Jaeger    Grafana
-63. Conclusão
-
-A arquitetura foi construída para manter as regras financeiras e os casos de uso independentes dos detalhes de infraestrutura.
-
-Os principais mecanismos de confiabilidade são:
-
-Money exato
-     +
-Database Transactions
-     +
-Concurrency Control
-     +
-Idempotency
-     +
+      +
 Inbox
-     +
+      +
 Outbox
-     +
-SQS Retry
-     +
-DLQ
+      +
+Asynchronous Messaging
+      +
+Concurrency Control
+      +
+Observability
+      +
+Automated Tests
+```
 
-Os principais mecanismos de observabilidade são:
+Essa combinação permite que o sistema seja executado localmente, testado de
+forma determinística e posteriormente evoluído para uma infraestrutura AWS
+sem necessidade de alterar as regras centrais do domínio.
 
-OpenTelemetry
-     +
-OTel Collector
-     +
-Prometheus
-     +
-Grafana
-     +
-Jaeger
+A principal característica arquitetural é o desacoplamento:
 
-Os principais mecanismos de desacoplamento são:
+```text
+Business Rules
+      ≠
+Infrastructure
+```
 
-Ports
-     +
-Adapters
-     +
-Dependency Inversion
-     +
-Composition Root
-
-Com isso, o sistema consegue processar operações financeiras de forma consistente, suportar processamento síncrono e assíncrono, tolerar redelivery, evitar duplicidade e double spend, além de oferecer observabilidade suficiente para operação e diagnóstico.
-
-O projeto encontra-se em estado de implementação funcional concluída e validada.
+Isso permite evoluir banco, mensageria, autenticação, observabilidade e ambiente
+de execução mantendo estáveis os casos de uso e o domínio.
