@@ -1239,12 +1239,25 @@ Backend Challenge - Distributed Wager Processing
 
 O dashboard contém informações de:
 
-- HTTP;
-- Wager;
-- latency;
-- business outcomes;
-- SQS;
-- Inbox.
+### Indicadores do Dashboard
+
+#### 1. HTTP
+Monitora o comportamento da API HTTP, incluindo volume de requisições, taxa de erros e latência das respostas. Permite identificar indisponibilidade, degradação de performance e aumento de erros.
+
+#### 2. Wager
+Acompanha o processamento das apostas, mostrando a quantidade de transações recebidas e seus respectivos estados, como processadas e rejeitadas. Permite acompanhar o volume e o resultado do processamento das apostas.
+
+#### 3. Latency
+Mede o tempo necessário para processar as operações, principalmente requisições HTTP e transações de apostas. Os percentis P50 e P95 ajudam a identificar o tempo típico e os casos de maior latência.
+
+#### 4. Business Outcomes
+Representa os resultados de negócio das apostas, diferenciando operações processadas com sucesso das rejeitadas. Permite acompanhar o comportamento funcional do sistema, além da simples disponibilidade técnica.
+
+#### 5. SQS
+Monitora o processamento assíncrono das mensagens, incluindo mensagens recebidas, processadas e removidas da fila. Permite verificar o funcionamento do fluxo distribuído e identificar possíveis acúmulos ou falhas no consumidor.
+
+#### 6. Inbox
+Acompanha o mecanismo de Inbox utilizado para garantir processamento idempotente das mensagens. Permite observar mensagens recebidas, processadas e situações de duplicidade, ajudando a validar que uma mesma mensagem não seja processada mais de uma vez.
 
 ---
 
