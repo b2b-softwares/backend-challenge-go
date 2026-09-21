@@ -131,11 +131,8 @@ Visão simplificada:
 
 ```text
                          CLIENT
-
                            │
-
                            ▼
-
                     ┌─────────────┐
                     │  Keycloak   │
                     │    OIDC     │
@@ -248,7 +245,6 @@ Detalhes completos estão em [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ```text
 .
-
 ├── cmd/
 │   └── app/
 │       └── main.go
@@ -368,7 +364,6 @@ docker compose version
 
 ```bash
 git clone git@github.com:b2b-softwares/backend-challenge-go.git
-
 cd backend-challenge-go
 ```
 
@@ -408,31 +403,49 @@ Após iniciar o ambiente:
 
 | Serviço | URL |
 |---|---|
-| API | [http://localhost:8080](http://localhost:8080) |
-| Grafana | [http://localhost:3000](http://localhost:3000) |
-| Prometheus | [http://localhost:9090](http://localhost:9090) |
-| Jaeger | [http://localhost:16686](http://localhost:16686) |
-| Keycloak | [http://localhost:8081](http://localhost:8081) |
-| MiniStack | [http://localhost:4566](http://localhost:4566) |
-| OTel Collector Metrics | [http://localhost:8889/metrics](http://localhost:8889/metrics) |
+| API | http://localhost:8080 |
+| Grafana | http://localhost:3000 |
+| Prometheus | http://localhost:9090 |
+| Jaeger | http://localhost:16686 |
+| Keycloak | http://localhost:8081 |
+| MiniStack | http://localhost:4566 |
+| OTel Collector Metrics | http://localhost:8889/metrics |
 
 ---
 
 # 11. Health Checks
 
-Health:
+Os endpoints de health fazem parte da API e, na configuração atual, estão protegidos pelo middleware de autenticação.
+
+Sem token:
 
 ```bash
 curl -i http://localhost:8080/health
 ```
 
+Resultado esperado:
+
+```text
+HTTP/1.1 401 Unauthorized
+```
+
+Com token válido:
+
+```bash
+curl -i \
+  -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8080/health
+```
+
 Readiness:
 
 ```bash
-curl -i http://localhost:8080/health/ready
+curl -i \
+  -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8080/health/ready
 ```
 
-A aplicação deve retornar:
+Resposta esperada:
 
 ```json
 {
@@ -540,11 +553,19 @@ Sem token:
 curl -i http://localhost:8080/health/ready
 ```
 
-A chamada autenticada deve exigir:
+Resultado esperado:
+
+```text
+HTTP/1.1 401 Unauthorized
+```
+
+A chamada autenticada deve utilizar:
 
 ```text
 Authorization: Bearer <token>
 ```
+
+A API valida o access token OAuth2 emitido pelo Keycloak, incluindo issuer, assinatura/JWKS, audience e validade temporal do token.
 
 ---
 
@@ -560,7 +581,7 @@ curl -s \
   "http://localhost:8081/realms/backend-challenge/protocol/openid-connect/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "grant_type=client_credentials" \
-  -d "client_id=backend-api-client" \
+  -d "client_id=backend-api" \
   -d "client_secret=backend-api-secret"
 ```
 
@@ -572,7 +593,7 @@ TOKEN=$(curl -s \
   "http://localhost:8081/realms/backend-challenge/protocol/openid-connect/token" \
   -H "Content-Type: application/x-www-form-urlencoded" \
   -d "grant_type=client_credentials" \
-  -d "client_id=backend-api-client" \
+  -d "client_id=backend-api" \
   -d "client_secret=backend-api-secret" \
   | jq -r '.access_token')
 ```
@@ -794,9 +815,7 @@ Exemplo conceitual:
 
 ```text
 Saldo = 90
-
 Request A = 50
-
 Request B = 50
 ```
 
@@ -844,10 +863,8 @@ Com saldo inicial de R$90, o resultado esperado é:
 
 ```text
 Uma operação  → PROCESSED
-
 Uma operação  → REJECTED
-
-Saldo final → R$40
+Saldo final   → R$40
 ```
 
 ---
@@ -964,11 +981,8 @@ O fluxo esperado é:
 
 ```text
 PENDING
-
    │
-
    ▼
-
 Published
 ```
 
@@ -1021,41 +1035,23 @@ O consumer deve:
 
 ```text
 Receive message
-
      │
-
      ▼
-
 Validate
-
      │
-
      ▼
-
 Inbox
-
      │
-
      ▼
-
 Claim
-
      │
-
      ▼
-
 Process
-
      │
-
      ▼
-
 Mark Processed
-
      │
-
      ▼
-
 Delete SQS
 ```
 
@@ -1069,23 +1065,14 @@ O comportamento esperado é:
 
 ```text
 Message
-
    │
-
    ▼
-
 Processing
-
    │
-
    X
-
 Failure
-
    │
-
    ▼
-
 Redelivery
 ```
 
@@ -1124,25 +1111,15 @@ O fluxo esperado é:
 
 ```text
 Pending Reference
-
        │
-
        ▼
-
 Worker
-
        │
-
        ▼
-
 Reference Available?
-
        │
-
        ├── Yes → Process
-
        │
-
        └── No  → Retry
 ```
 
@@ -1231,19 +1208,19 @@ go build -o backend-challenge ./cmd/app
 
 # 41. Fase 25 — Formatação
 
-Formatar o projeto:
+Formatar todos os arquivos Go:
 
 ```bash
-gofmt -w .
+find . -name '*.go' -not -path './vendor/*' -print0 | xargs -0 gofmt -w
 ```
 
-Verificar arquivos que precisariam ser formatados:
+Verificar arquivos que ainda precisariam ser formatados:
 
 ```bash
-gofmt -l .
+find . -name '*.go' -not -path './vendor/*' -print0 | xargs -0 gofmt -l
 ```
 
-O comando acima deve não retornar arquivos pendentes.
+O comando acima não deve retornar arquivos pendentes.
 
 ---
 
@@ -1321,15 +1298,10 @@ A observabilidade utiliza:
 
 ```text
 OpenTelemetry
-
       │
-
       ▼
-
 OTel Collector
-
       │
-
       ├────────────► Prometheus
       │                  │
       │                  ▼
@@ -1380,11 +1352,24 @@ Monitora o processamento assíncrono das mensagens, incluindo mensagens recebida
 
 #### 6. Inbox
 
-Acompanha o mecanismo de Inbox utilizado para garantir processamento idempotente das mensagens. Permite observar mensagens recebidas, processadas e situações de duplicidade, ajudando a validar que uma mesma mensagem não seja processada mais de uma vez.
+Acompanha o mecanismo de Inbox utilizado para garantir processamento idempotente das mensagens. Permite observar mensagens recebidas e processadas, ajudando a validar que uma mesma mensagem não seja processada mais de uma vez.
 
 ---
 
 # 46. Painéis do Grafana
+
+O dashboard contém dez painéis principais:
+
+1. HTTP Request Rate
+2. HTTP Error Rate
+3. HTTP Latency P95
+4. HTTP Latency P50
+5. Wager Transactions
+6. Wager Processing Latency
+7. Wager Business Outcomes
+8. SQS Consumer
+9. SQS Processing Latency
+10. Inbox / Idempotent Consumer
 
 ## HTTP Request Rate
 
@@ -1572,16 +1557,21 @@ Consultar:
 up
 ```
 
-Ver métricas disponíveis:
+Métricas disponíveis na aplicação:
 
 ```text
+http_server_request_body_size_bytes
 http_server_request_duration_seconds
+http_server_response_body_size_bytes
+
 inbox_messages_processed_total
 inbox_messages_received_total
+
 sqs_message_processing_duration_seconds
 sqs_messages_deleted_total
 sqs_messages_processed_total
 sqs_messages_received_total
+
 wager_processing_duration_seconds
 wager_transactions_processed_total
 wager_transactions_total
@@ -1657,35 +1647,20 @@ Fluxo recomendado para investigação:
 
 ```text
 Grafana
-
    │
-
    ▼
-
 Detectar aumento de latency/error
-
    │
-
    ▼
-
 Jaeger
-
    │
-
    ▼
-
 Encontrar trace
-
    │
-
    ▼
-
 Identificar span lento
-
    │
-
    ▼
-
 Investigar PostgreSQL / SQS
 ```
 
@@ -1785,7 +1760,6 @@ Executar uma requisição:
 
 ```text
 Idempotency-Key = test-123
-
 Amount = 10.00
 ```
 
@@ -1793,7 +1767,6 @@ Repetir:
 
 ```text
 Idempotency-Key = test-123
-
 Amount = 10.00
 ```
 
@@ -1801,7 +1774,6 @@ Esperado:
 
 ```text
 Primeira → Processed
-
 Segunda  → Replay
 ```
 
@@ -1809,7 +1781,6 @@ Depois:
 
 ```text
 Idempotency-Key = test-123
-
 Amount = 20.00
 ```
 
@@ -1842,9 +1813,7 @@ Esperado:
 
 ```text
 Processed = 1
-
 Rejected  = 1
-
 Balance   = 40
 ```
 
@@ -1855,56 +1824,31 @@ Balance   = 40
 Antes de considerar a versão pronta:
 
 ```text
-[ ] gofmt -l .
-
+[ ] Formatação dos arquivos Go
 [ ] go test ./...
-
 [ ] go test -race ./...
-
 [ ] go build ./...
-
 [ ] docker compose build
-
 [ ] docker compose up -d
-
 [ ] /health
-
 [ ] /health/ready
-
 [ ] Keycloak token
-
 [ ] API authenticated
-
 [ ] Wager processed
-
 [ ] Idempotency replay
-
 [ ] Idempotency conflict
-
 [ ] Insufficient balance
-
 [ ] Concurrent wagers
-
 [ ] Ledger
-
 [ ] Inbox
-
 [ ] Outbox
-
 [ ] SQS consumer
-
 [ ] Redelivery
-
 [ ] DLQ
-
 [ ] Pending Reference Worker
-
 [ ] Prometheus
-
 [ ] Grafana
-
 [ ] Jaeger
-
 [ ] OpenTelemetry
 ```
 
@@ -1985,6 +1929,14 @@ Verifique:
 - URL;
 - client configurado para `client_credentials`.
 
+Valores locais:
+
+```text
+Realm: backend-challenge
+Client ID: backend-api
+Client Secret: backend-api-secret
+```
+
 Logs:
 
 ```bash
@@ -2002,6 +1954,17 @@ Authorization: Bearer <TOKEN>
 ```
 
 e confirme se o token foi emitido pelo realm correto.
+
+Também confirme:
+
+```text
+issuer
+audience
+exp
+nbf
+signature
+JWKS
+```
 
 ---
 
@@ -2102,8 +2065,6 @@ docker compose logs grafana
 
 O diretório de dashboards deve estar disponível para o container.
 
-Se estiver utilizando Docker Desktop, confirme que o diretório do projeto está habilitado em File Sharing.
-
 ---
 
 ## Grafana sem métricas
@@ -2178,32 +2139,21 @@ Nesse caso, as dependências externas precisam estar disponíveis e as variávei
 
 A configuração é externalizada.
 
-Exemplos de categorias:
+Variáveis relacionadas ao ambiente local incluem:
 
 ```text
-DATABASE_URL
-DATABASE_HOST
-DATABASE_PORT
-DATABASE_USER
-DATABASE_PASSWORD
-DATABASE_NAME
+KEYCLOAK_PORT=8081
+KEYCLOAK_ADMIN_USERNAME=admin
+KEYCLOAK_ADMIN_PASSWORD=admin
 
-SQS_ENDPOINT
-SQS_QUEUE_NAME
-SQS_DLQ_NAME
-AWS_REGION
-
-KEYCLOAK_URL
-KEYCLOAK_REALM
-KEYCLOAK_CLIENT_ID
-KEYCLOAK_CLIENT_SECRET
-
-OTEL_EXPORTER_OTLP_ENDPOINT
-OTEL_SERVICE_NAME
-OTEL_ENVIRONMENT
+OIDC_ISSUER_URL=http://keycloak:8080/realms/backend-challenge
+OIDC_CLIENT_ID=backend-api
+OIDC_AUDIENCE=backend-api
 ```
 
-Os nomes exatos devem seguir a configuração existente em `internal/config`.
+Demais variáveis de banco, SQS, observabilidade e aplicação devem seguir a configuração existente em `internal/config` e `.env.example`.
+
+Não duplicar valores de configuração no código quando eles puderem ser externalizados por ambiente.
 
 ---
 
@@ -2234,19 +2184,12 @@ Local:
 
 ```text
 PostgreSQL
-
 MiniStack
-
 Keycloak
-
 Docker Compose
-
 OpenTelemetry
-
 Prometheus
-
 Grafana
-
 Jaeger
 ```
 
@@ -2254,17 +2197,11 @@ Possível produção:
 
 ```text
 RDS PostgreSQL
-
 Amazon SQS
-
 OIDC Provider
-
 ECS / EKS
-
 OpenTelemetry
-
 Prometheus
-
 Grafana
 ```
 
@@ -2280,9 +2217,7 @@ A API é stateless.
 
 ```text
 API 1
-
 API 2
-
 API 3
 ```
 
@@ -2290,9 +2225,7 @@ Consumers também podem ser escalados:
 
 ```text
 Consumer 1
-
 Consumer 2
-
 Consumer 3
 ```
 
@@ -2315,23 +2248,14 @@ A operação financeira principal deve ser transacional:
 
 ```text
 BEGIN
-
     │
-
     ├── lock wallet
-
     ├── validate balance
-
     ├── update wallet
-
     ├── create transaction
-
     ├── append ledger
-
     └── create outbox
-
     │
-
 COMMIT
 ```
 
@@ -2349,29 +2273,17 @@ A parte assíncrona é eventualmente consistente:
 
 ```text
 Transaction
-
     │
-
     ▼
-
 Outbox
-
     │
-
     ▼
-
 SQS
-
     │
-
     ▼
-
 Consumer
-
     │
-
     ▼
-
 Inbox
 ```
 
@@ -2391,13 +2303,9 @@ O modelo é:
 
 ```text
 At-Least-Once Delivery
-
           +
-
 Idempotent Processing
-
           =
-
 Effectively Once Business Effect
 ```
 
@@ -2417,15 +2325,10 @@ Sem Outbox:
 
 ```text
 DB COMMIT
-
    │
-
    ▼
-
 Publish SQS
-
    │
-
    X
 ```
 
@@ -2437,11 +2340,8 @@ Com Outbox:
 BEGIN
 
 Wallet
-
 Transaction
-
 Ledger
-
 Outbox
 
 COMMIT
@@ -2451,11 +2351,8 @@ Depois:
 
 ```text
 Outbox
-
    │
-
    ▼
-
 SQS
 ```
 
@@ -2471,23 +2368,14 @@ Sem Inbox:
 
 ```text
 Message
-
    │
-
    ▼
-
 Debit
-
    │
-
    ▼
-
 Redelivery
-
    │
-
    ▼
-
 Debit AGAIN
 ```
 
@@ -2495,23 +2383,14 @@ Com Inbox:
 
 ```text
 Message
-
    │
-
    ▼
-
 Inbox
-
    │
-
    ▼
-
 Debit
-
    │
-
    ▼
-
 PROCESSED
 ```
 
@@ -2519,17 +2398,11 @@ Na redelivery:
 
 ```text
 Message
-
    │
-
    ▼
-
 Inbox
-
    │
-
    ▼
-
 Already Processed
 ```
 
@@ -2548,12 +2421,9 @@ Wallet
 ------
 Balance = 90.00
 
-
 Ledger
 ------
-
 +100.00
-
 -10.00
 ```
 
@@ -2591,11 +2461,8 @@ O consumer expõe:
 
 ```text
 sqs_messages_received_total
-
 sqs_messages_processed_total
-
 sqs_messages_deleted_total
-
 sqs_message_processing_duration_seconds
 ```
 
@@ -2621,7 +2488,6 @@ As métricas:
 
 ```text
 inbox_messages_received_total
-
 inbox_messages_processed_total
 ```
 
@@ -2635,9 +2501,7 @@ A validação mínima recomendada é:
 
 ```bash
 go test ./...
-
 go test -race ./...
-
 go build ./...
 ```
 
@@ -2645,7 +2509,6 @@ Se houver Docker disponível:
 
 ```bash
 docker compose build
-
 docker compose up -d
 ```
 
@@ -2688,18 +2551,15 @@ go build ./...
 Format:
 
 ```bash
-gofmt -w .
+find . -name '*.go' -not -path './vendor/*' -print0 | xargs -0 gofmt -w
 ```
 
 Docker:
 
 ```bash
 docker compose up -d
-
 docker compose down
-
 docker compose ps
-
 docker compose logs -f
 ```
 
@@ -2729,9 +2589,7 @@ Quando houver alteração no código ou Dockerfile:
 
 ```bash
 docker compose down
-
 docker compose build --no-cache
-
 docker compose up -d
 ```
 
@@ -2773,28 +2631,34 @@ Uma validação completa pode ser executada nesta ordem:
 
 ```bash
 docker compose up -d
-
 docker compose ps
+```
+
+## OIDC
+
+Obter token:
+
+```bash
+TOKEN=$(curl -s \
+  -X POST \
+  "http://localhost:8081/realms/backend-challenge/protocol/openid-connect/token" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "grant_type=client_credentials" \
+  -d "client_id=backend-api" \
+  -d "client_secret=backend-api-secret" \
+  | jq -r '.access_token')
 ```
 
 ## Health
 
 ```bash
-curl -i http://localhost:8080/health
+curl -i \
+  -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8080/health
 
-curl -i http://localhost:8080/health/ready
-```
-
-## OIDC
-
-```bash
-curl -s \
-  -X POST \
-  "http://localhost:8081/realms/backend-challenge/protocol/openid-connect/token" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "grant_type=client_credentials" \
-  -d "client_id=backend-api-client" \
-  -d "client_secret=backend-api-secret"
+curl -i \
+  -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8080/health/ready
 ```
 
 ## Testes automatizados
@@ -2813,6 +2677,14 @@ go test -race ./...
 
 ```bash
 go build ./...
+```
+
+## Docker
+
+```bash
+docker compose build
+docker compose up -d
+docker compose ps
 ```
 
 ## Observabilidade
@@ -2906,9 +2778,7 @@ Os principais cenários funcionais validados incluem:
 
 ```text
 Sem token
-
     ↓
-
 401
 ```
 
@@ -2916,13 +2786,9 @@ Com token válido:
 
 ```text
 Bearer Token
-
     ↓
-
 API
-
     ↓
-
 200
 ```
 
@@ -2932,13 +2798,11 @@ API
 
 ```text
 Wallet = 100
-
 Bet = 10
 
 Result:
 
 Wallet = 90
-
 Transaction = PROCESSED
 ```
 
@@ -2948,19 +2812,13 @@ Transaction = PROCESSED
 
 ```text
 Request 1
-
     ↓
-
 Processed
 
 Request 2
-
 same Idempotency-Key
-
 same payload
-
     ↓
-
 Replay
 ```
 
@@ -2972,15 +2830,11 @@ Sem novo débito.
 
 ```text
 Request 1
-
 Key = X
-
 Amount = 10
 
 Request 2
-
 Key = X
-
 Amount = 20
 ```
 
@@ -3016,7 +2870,6 @@ Sem débito.
 Balance = 90
 
 Bet A = 50
-
 Bet B = 50
 ```
 
@@ -3024,9 +2877,7 @@ Resultado:
 
 ```text
 One processed
-
 One rejected
-
 Final balance = 40
 ```
 
@@ -3038,21 +2889,13 @@ Mensagem publicada:
 
 ```text
 SQS
-
  ↓
-
 Consumer
-
  ↓
-
 Inbox
-
  ↓
-
 Business Processing
-
  ↓
-
 Delete Message
 ```
 
@@ -3212,21 +3055,15 @@ O domínio permanece desacoplado da infraestrutura, permitindo substituir compon
 
 ```text
 SQS
-
   ↕
-
 RabbitMQ
 
 PostgreSQL
-
   ↕
-
 Outro adapter de persistência
 
 MiniStack
-
   ↕
-
 AWS
 ```
 
@@ -3239,7 +3076,7 @@ sem alterar as regras centrais do negócio.
 Antes de entregar:
 
 ```bash
-gofmt -w .
+find . -name '*.go' -not -path './vendor/*' -print0 | xargs -0 gofmt -w
 
 go test ./...
 
